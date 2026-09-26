@@ -1,3 +1,5 @@
+Proyecto construido con OpenClaw + ChatGPT Codex.
+
 # router-openai-oauth
 
 Proxy OpenAI-compatible con failover secuencial para varias instancias de
