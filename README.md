@@ -82,7 +82,7 @@ contra `eduard`. La sexta petición empieza en `anna`. Los logs muestran el
 progreso en el prefijo:
 
 ```text
-[router-openai-oauth] [eduard] [4/5] WARN 2026-10-03 14:26:25 upstream_client_error {...}
+[router-openai-oauth] [principal] [4/5] WARN 2026-10-03 14:26:25 upstream_client_error {...}
 ```
 
 Cada petición comienza siempre por el primer upstream y avanza en orden solo
