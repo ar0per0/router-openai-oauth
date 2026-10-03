@@ -1,28 +1,19 @@
 import { loadConfig } from "./config.mjs"
-import { checkUpstreams, createRouterServer } from "./server.mjs"
-
-const writeLog = (level, event, details = {}) => {
-	const timestamp = new Date().toISOString()
-	const alias = details.alias
-	const prefix = alias ? `[router-openai-oauth] [${alias}]` : "[router-openai-oauth]"
-	console.log(`${prefix} ${level.toUpperCase()} ${timestamp} ${event} ${JSON.stringify(details)}`)
-}
-
-const logger = {
-	info: (event, details) => writeLog("info", event, details),
-	warn: (event, details) => writeLog("warn", event, details),
-	error: (event, details) => writeLog("error", event, details),
-}
+import { createLogger } from "./logger.mjs"
+import { createRouterServer, validateUpstreamsAtStartup } from "./server.mjs"
 
 let config
 try {
 	config = loadConfig()
 } catch (error) {
-	logger.error("invalid_configuration", { error: error.message })
+	createLogger().error("invalid_configuration", { error: error.message })
 	process.exit(2)
 }
 
-const server = createRouterServer(config, { logger })
+const logger = createLogger({ timeZone: config.timeZone })
+
+const initialUpstreamHealth = await validateUpstreamsAtStartup(config, { logger })
+const server = createRouterServer(config, { logger, initialUpstreamHealth })
 
 server.on("error", (error) => {
 	logger.error("server_error", { error: error.code || error.message })
@@ -39,6 +30,9 @@ server.listen(config.port, config.host, () => {
 		})),
 		retryStatusCodes: config.retryStatusCodes,
 		failureThreshold: config.upstreamFailureThreshold,
+		clientErrorFailureThreshold: config.clientErrorFailureThreshold,
+		startupHealthcheckEnabled: config.startupHealthcheckEnabled,
+		runtimeFailover: config.runtimeFailover,
 		cooldownMs: config.upstreamCooldownMs,
 		authentication: config.apiKey ? "enabled" : "disabled",
 	})
@@ -47,9 +41,6 @@ server.listen(config.port, config.host, () => {
 			message: "Configura ROUTER_API_KEY o limita el acceso mediante red/firewall",
 		})
 	}
-	void checkUpstreams(config, { logger }).catch((error) => {
-		logger.error("upstream_healthcheck_error", { error: error.message })
-	})
 })
 
 let shuttingDown = false

@@ -22,6 +22,33 @@ const parseDuration = (name, value, { minimum, maximum }) => {
 	return milliseconds
 }
 
+const parseTimeZone = (value) => {
+	const timeZone = String(value || "")
+	try {
+		new Intl.DateTimeFormat("en-CA", { timeZone }).format()
+	} catch {
+		throw new Error("TZ debe ser una zona horaria IANA válida, como Europe/Madrid")
+	}
+	return timeZone
+}
+
+const parseBoolean = (name, value) => {
+	const normalized = String(value).trim().toLowerCase()
+	if (normalized === "true") return true
+	if (normalized === "false") return false
+	throw new Error(`${name} debe ser true o false`)
+}
+
+const parseOptionalModel = (value) => {
+	const model = String(value || "").trim()
+	if (model && !/^[A-Za-z0-9._:-]{1,128}$/.test(model)) {
+		throw new Error(
+			"STARTUP_HEALTHCHECK_MODEL debe contener solo caracteres alfanuméricos, punto, guion, guion bajo o dos puntos",
+		)
+	}
+	return model
+}
+
 export const parseUpstreams = (value) => {
 	const entries = String(value || "")
 		.split("|")
@@ -101,6 +128,7 @@ export const loadConfig = (environment = process.env) => {
 
 	return {
 		host,
+		timeZone: parseTimeZone(environment.TZ || "Etc/UTC"),
 		port: parseInteger("PORT", environment.PORT || "10530", {
 			minimum: 1,
 			maximum: 65535,
@@ -113,13 +141,27 @@ export const loadConfig = (environment = process.env) => {
 		),
 		startupHealthcheckTimeoutMs: parseInteger(
 			"STARTUP_HEALTHCHECK_TIMEOUT_MS",
-			environment.STARTUP_HEALTHCHECK_TIMEOUT_MS || "5000",
-			{ minimum: 1, maximum: 60000 },
+			environment.STARTUP_HEALTHCHECK_TIMEOUT_MS || "30000",
+			{ minimum: 1, maximum: 300000 },
 		),
+		startupHealthcheckEnabled: parseBoolean(
+			"STARTUP_HEALTHCHECK_ENABLED",
+			environment.STARTUP_HEALTHCHECK_ENABLED || "true",
+		),
+		startupHealthcheckModel: parseOptionalModel(environment.STARTUP_HEALTHCHECK_MODEL),
 		upstreamFailureThreshold: parseInteger(
 			"UPSTREAM_FAILURE_THRESHOLD",
 			environment.UPSTREAM_FAILURE_THRESHOLD || "3",
 			{ minimum: 1, maximum: 100 },
+		),
+		clientErrorFailureThreshold: parseInteger(
+			"CLIENT_ERROR_FAILURE_THRESHOLD",
+			environment.CLIENT_ERROR_FAILURE_THRESHOLD || "5",
+			{ minimum: 1, maximum: 100 },
+		),
+		runtimeFailover: parseBoolean(
+			"RUNTIME_FAILOVER",
+			environment.RUNTIME_FAILOVER || "false",
 		),
 		upstreamCooldownMs: parseDuration(
 			"UPSTREAM_COOLDOWN",

@@ -6,7 +6,7 @@
   "description": "Proxy OpenAI-compatible con failover secuencial para varias instancias openai-oauth.",
   "scripts": {
     "start": "node src/index.mjs",
-    "check": "node --check src/config.mjs && node --check src/server.mjs && node --check src/index.mjs",
+    "check": "node --check src/config.mjs && node --check src/logger.mjs && node --check src/server.mjs && node --check src/index.mjs",
     "test": "node --test"
   },
   "engines": {
