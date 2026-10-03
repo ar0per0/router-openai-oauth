@@ -78,7 +78,7 @@ El failover secuencial por petición puede recuperarse más adelante con
   mantienen el failover secuencial normal.
 
 Por ejemplo, con un umbral de `5`, deben fallar cinco peticiones diferentes
-contra `eduard`. La sexta petición empieza en `anna`. Los logs muestran el
+contra `principal`. La sexta petición empieza en `respaldo`. Los logs muestran el
 progreso en el prefijo:
 
 ```text
