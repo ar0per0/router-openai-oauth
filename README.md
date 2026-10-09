@@ -84,11 +84,11 @@ El failover secuencial por petición puede recuperarse más adelante con
   mantienen el failover secuencial normal.
 
 Por ejemplo, con un umbral de `5`, deben fallar cinco peticiones diferentes
-contra `eduard`. La sexta petición empieza en `anna`. Los logs muestran el
+contra `cuenta1`. La sexta petición empieza en `cuenta2`. Los logs muestran el
 progreso en el prefijo:
 
 ```text
-[router-openai-oauth] [eduard] [4/5] WARN 2026-10-03 14:26:25 upstream_client_error {...}
+[router-openai-oauth] [principal] [4/5] WARN 2026-10-03 14:26:25 upstream_client_error {...}
 ```
 
 Cada petición comienza siempre por el primer upstream y avanza en orden solo
@@ -425,7 +425,7 @@ la palabra upstreams. Activos (`closed`) verdes, deshabilitados (`open`) rojos
  y recuperación (`half_open`) amarilla separada; estados ausentes desconocidos.
 El resumen refleja circuitos, no cuotas ni una comprobación de salud OAuth.
 Vencimiento no significa activo: hace falta una sonda exitosa.
-Cada encabezado lleva posición 1-based del array backend, sin reordenarlo: `(1) eduard`.
+Cada encabezado lleva posición 1-based del array backend, sin reordenarlo: `(1) cuenta1`.
 Título closed verde sin Activo/Activado separado; open rojo sin cuenta atrás
 de reanudación en el encabezado ni Deshabilitado repetido; half_open
 amarillo con etiqueta En recuperación y unknown sin color de salud. Sin
@@ -533,7 +533,7 @@ en la última sección de IMPLEMENTATION-RESULT.md.
 
 ### Resultado UI/scroll — 2026-10-06
 Panel Router centrado (max 72rem), logs fuera del wrapper a ancho disponible,
-encabezados `(1) eduard` y seguimiento de logs con pausa/reanudación por scroll.
+encabezados `(1) cuenta1` y seguimiento de logs con pausa/reanudación por scroll.
 Verificación dirigida **13/13** DOM/VM/CSS y sintaxis correcta. Sin navegador
 real, suite global, audit, Docker, deploy, live ni lectura de secretos.
 Evidencia y limitaciones en la sección final de IMPLEMENTATION-RESULT.md.
