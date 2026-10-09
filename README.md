@@ -18,6 +18,13 @@ http://router-openai-oauth:10530/v1
 El router conserva método, ruta, query, cuerpo y cabeceras, y devuelve la
 respuesta del upstream seleccionado. No modifica el formato OpenAI.
 
+Panel web para visualizar el estado/consumo de los upstream. Permite ver el consumo de tokens.
+```text
+http://router-openai-oauth:10530/router/
+```
+![Captura1](./captura1.png)
+![Captura2](./captura2.png)
+
 ---
 
 ## Inicio rápido
