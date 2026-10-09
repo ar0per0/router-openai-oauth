@@ -1,3 +1,5 @@
+import { resolve } from "node:path"
+
 const parseInteger = (name, value, { minimum, maximum }) => {
 	if (!/^[0-9]+$/.test(String(value))) {
 		throw new Error(`${name} debe ser un entero entre ${minimum} y ${maximum}`)
@@ -37,16 +39,6 @@ const parseBoolean = (name, value) => {
 	if (normalized === "true") return true
 	if (normalized === "false") return false
 	throw new Error(`${name} debe ser true o false`)
-}
-
-const parseOptionalModel = (value) => {
-	const model = String(value || "").trim()
-	if (model && !/^[A-Za-z0-9._:-]{1,128}$/.test(model)) {
-		throw new Error(
-			"STARTUP_HEALTHCHECK_MODEL debe contener solo caracteres alfanuméricos, punto, guion, guion bajo o dos puntos",
-		)
-	}
-	return model
 }
 
 export const parseUpstreams = (value) => {
@@ -128,6 +120,7 @@ export const loadConfig = (environment = process.env) => {
 
 	return {
 		host,
+		usageDbPath: environment.USAGE_DB_PATH || resolve(process.cwd(), "data/usage.sqlite"),
 		timeZone: parseTimeZone(environment.TZ || "Etc/UTC"),
 		port: parseInteger("PORT", environment.PORT || "10530", {
 			minimum: 1,
@@ -139,16 +132,6 @@ export const loadConfig = (environment = process.env) => {
 			environment.UPSTREAM_TIMEOUT_MS || "180000",
 			{ minimum: 1, maximum: 3600000 },
 		),
-		startupHealthcheckTimeoutMs: parseInteger(
-			"STARTUP_HEALTHCHECK_TIMEOUT_MS",
-			environment.STARTUP_HEALTHCHECK_TIMEOUT_MS || "30000",
-			{ minimum: 1, maximum: 300000 },
-		),
-		startupHealthcheckEnabled: parseBoolean(
-			"STARTUP_HEALTHCHECK_ENABLED",
-			environment.STARTUP_HEALTHCHECK_ENABLED || "true",
-		),
-		startupHealthcheckModel: parseOptionalModel(environment.STARTUP_HEALTHCHECK_MODEL),
 		upstreamFailureThreshold: parseInteger(
 			"UPSTREAM_FAILURE_THRESHOLD",
 			environment.UPSTREAM_FAILURE_THRESHOLD || "3",
@@ -163,6 +146,7 @@ export const loadConfig = (environment = process.env) => {
 			"RUNTIME_FAILOVER",
 			environment.RUNTIME_FAILOVER || "false",
 		),
+		// Legacy override for generic failures only; quota resets use provider timestamps.
 		upstreamCooldownMs: parseDuration(
 			"UPSTREAM_COOLDOWN",
 			environment.UPSTREAM_COOLDOWN || "10m",
@@ -177,5 +161,7 @@ export const loadConfig = (environment = process.env) => {
 			environment.RETRY_STATUS_CODES || "401,403,408,429,500-599",
 		),
 		apiKey: environment.ROUTER_API_KEY || "",
+  quotaTimeoutMs: parseInteger('QUOTA_TIMEOUT_MS', environment.QUOTA_TIMEOUT_MS || '10000', { minimum: 1, maximum: 60000 }),
+  quotaCacheMs: parseInteger('QUOTA_CACHE_MS', environment.QUOTA_CACHE_MS || '15000', { minimum: 1, maximum: 300000 }),
 	}
 }

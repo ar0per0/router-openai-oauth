@@ -1,0 +1,82 @@
+ :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { margin: 0; }
+main { box-sizing: border-box; min-width: 0; width: 100%; max-width: none; margin: auto; padding: 1.5rem; }
+#router-panel { min-width: 0; width: 100%; max-width: 72rem; margin-inline: auto; }
+input, button { font: inherit; padding: .6rem; margin: .25rem; }
+input { max-width: 100%; box-sizing: border-box; }
+button { cursor: pointer; }
+button:disabled { cursor: default; opacity: .6; }
+article { border: 1px solid #888; border-radius: .5rem; padding: 1rem; margin: 1rem 0; }
+h3, h4 { margin-bottom: .5rem; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+#logs { box-sizing: border-box; min-width: 0; width: 100%; max-width: 100%; max-height: 30rem; overflow-x: auto; overflow-y: auto; overflow-anchor: none; white-space: pre; overflow-wrap: normal; word-break: normal; border: 1px solid #888; padding: 1rem; }
+
+.health-green { color: #16803c; }
+.health-yellow { color: #906500; }
+.health-red { color: #c72d35; }
+@media (prefers-color-scheme: dark) {
+ .health-green { color: #6ee796; }
+ .health-yellow { color: #ffd45a; }
+ .health-red { color: #ff8585; }
+}
+
+#accounts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; min-width: 0; }
+#accounts article { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+@media (max-width: 45rem) {
+ #accounts { grid-template-columns: minmax(0, 1fr); }
+}
+
+#log-status:empty, #accounts article p:empty { display: none; }
+
+#usage-panel { max-width: 72rem; margin: 2rem auto; border: 1px solid #8885; border-radius: 1rem; padding: 1.25rem; }
+.usage-controls { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 2fr) minmax(0, .85fr) minmax(0, .85fr) auto; gap: .75rem; align-items: end; min-width: 0; }
+.usage-controls > * { min-width: 0; }
+.usage-controls input, .usage-controls select { box-sizing: border-box; width: 100%; min-width: 0; margin: 0; }
+.usage-controls button { margin: 0; }
+@media (max-width: 60rem) {
+ .usage-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 30rem) {
+ .usage-controls { grid-template-columns: minmax(0, 1fr); }
+}
+.usage-controls label { display: grid; gap: .3rem; }
+.usage-controls select { font: inherit; padding: .6rem; max-width: 100%; }
+#usage-total, #usage-tooltip { font-size: 1.1em; font-weight: 700; line-height: 1; }
+/* Reserve the SVG viewport even while stale data is cleared. Removing it used
+   to shrink the document near its end and clamp the page's scroll position. */
+#usage-chart { aspect-ratio: 960 / 300; }
+#usage-chart svg { display: block; width: 100%; height: 100%; overflow: visible; }
+/* Inline summaries need only a baseline row, not the former multiline reserve.
+   Keep the chart viewport reservation independent of these compact wrappers. */
+.usage-summary { min-height: 1.8em; margin: .75rem 0; min-width: 0; overflow-wrap: anywhere; line-height: 1.8; font-variant-numeric: tabular-nums; }
+#usage-chart + .usage-summary { margin-bottom: 0; }
+#usage-status, #usage-pricing-status { margin: .75rem 0; }
+#usage-status:empty, #usage-pricing-status:empty { display: none; }
+.usage-breakdown { display: inline; font-size: inherit; }
+.usage-breakdown span { display: inline; }
+.usage-grid { stroke: #8883; }
+.usage-axis { fill: currentColor; opacity: .7; font-size: 14px; }
+.usage-line { stroke: #4285ee; stroke-width: 2.5; }
+.usage-point { fill: #4285ee; }
+.usage-partial { fill: #4285ee; stroke: CanvasText; stroke-width: 2; stroke-dasharray: 2 2; }
+.usage-hit { fill: transparent; }
+.usage-day { cursor: pointer; }
+.usage-day:focus { outline: none; }
+.usage-day[data-selected="true"] .usage-hit, .usage-day:focus .usage-hit, .usage-day:hover .usage-hit { fill: #4285ee18; stroke: CanvasText; stroke-width: 1; }
+.usage-day:focus .usage-hit { stroke-width: 2; }
+.usage-day[data-selected="true"] circle, .usage-day:focus circle, .usage-day:hover circle { stroke: CanvasText; stroke-width: 2; }
+#usage-tooltip { font-variant-numeric: tabular-nums; }
+#usage-status { font-size: .9rem; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+@media (prefers-color-scheme: dark) { #usage-panel { background: #141619; } }
+
+#usage-pricing-status { overflow-wrap: anywhere; font-size: .85rem; }
+#usage-model { width: 100%; min-width: 0; margin: 0; }
+.usage-controls label { min-width: 0; max-width: 100%; }
+
+.usage-model-control { position: relative; display: grid; gap: .3rem; min-width: 0; max-width: 100%; }
+#usage-model-options { position: absolute; z-index: 2; top: 100%; left: 0; right: 0; max-height: 16rem; overflow-y: auto; overscroll-behavior: contain; margin: .25rem 0 0; padding: .25rem; list-style: none; background: Canvas; color: CanvasText; border: 1px solid #888; border-radius: .4rem; }
+#usage-model-options[hidden] { display: none; }
+#usage-model-options li { padding: .6rem; overflow-wrap: anywhere; cursor: pointer; }
+#usage-model-options [aria-selected="true"] { font-weight: 700; }
+#usage-model-options .usage-model-active { background: #4285ee30; outline: 1px solid #4285ee; }

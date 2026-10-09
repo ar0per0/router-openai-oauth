@@ -1,6 +1,9 @@
 import { loadConfig } from "./config.mjs"
+import { createLogHub } from "./observability.mjs"
 import { createLogger } from "./logger.mjs"
-import { createRouterServer, validateUpstreamsAtStartup } from "./server.mjs"
+import { createRouterServer } from "./server.mjs"
+
+import { createUsageStore } from "./usage-store.mjs"
 
 let config
 try {
@@ -10,14 +13,16 @@ try {
 	process.exit(2)
 }
 
-const logger = createLogger({ timeZone: config.timeZone })
+const logHub = createLogHub()
+const logger = createLogger({ timeZone: config.timeZone, onRecord: logHub.publish })
 
-const initialUpstreamHealth = await validateUpstreamsAtStartup(config, { logger })
-const server = createRouterServer(config, { logger, initialUpstreamHealth })
+const usageStore = createUsageStore(config.usageDbPath,{ logger })
+const server = createRouterServer(config, { logger, logHub, usageStore })
 
 server.on("error", (error) => {
 	logger.error("server_error", { error: error.code || error.message })
 	process.exitCode = 1
+    shutdown("SERVER_ERROR")
 })
 
 server.listen(config.port, config.host, () => {
@@ -31,7 +36,6 @@ server.listen(config.port, config.host, () => {
 		retryStatusCodes: config.retryStatusCodes,
 		failureThreshold: config.upstreamFailureThreshold,
 		clientErrorFailureThreshold: config.clientErrorFailureThreshold,
-		startupHealthcheckEnabled: config.startupHealthcheckEnabled,
 		runtimeFailover: config.runtimeFailover,
 		cooldownMs: config.upstreamCooldownMs,
 		authentication: config.apiKey ? "enabled" : "disabled",
@@ -48,8 +52,10 @@ const shutdown = (signal) => {
 	if (shuttingDown) return
 	shuttingDown = true
 	logger.info("shutdown_started", { signal })
-	server.close((error) => {
-		if (error) {
+	logHub.close()
+	server.close(async (error) => {
+        try { await usageStore.close() } catch { logger.warn("usage_storage_error",{}) }
+		if (error && error.code !== "ERR_SERVER_NOT_RUNNING") {
 			logger.error("shutdown_error", { error: error.message })
 			process.exitCode = 1
 		}

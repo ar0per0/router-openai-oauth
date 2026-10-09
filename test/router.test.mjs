@@ -4,11 +4,7 @@ import http from "node:http"
 import { once } from "node:events"
 import { loadConfig, parseRetryStatusCodes, parseUpstreams } from "../src/config.mjs"
 import { createLogger } from "../src/logger.mjs"
-import {
-	checkUpstreams,
-	createRouterServer,
-	validateUpstreamsAtStartup,
-} from "../src/server.mjs"
+import { createRouterServer } from "../src/server.mjs"
 
 const listen = async (server) => {
 	server.listen(0, "127.0.0.1")
@@ -43,7 +39,7 @@ const startRouter = async (upstreamUrls, overrides = {}, routerOptions = {}) => 
 		ROUTER_API_KEY: "",
 		...overrides,
 	})
-	const server = createRouterServer(config, routerOptions)
+	const server = createRouterServer(config, { quotaFetchImpl: async () => Response.json({rateLimits:null}), ...routerOptions })
 	const url = await listen(server)
 	return { server, url }
 }
@@ -104,21 +100,6 @@ test("valida upstreams y reglas de estado", () => {
 		/TZ debe ser una zona horaria IANA válida/,
 	)
 	assert.equal(
-		loadConfig({
-			UPSTREAMS: "http://127.0.0.1:10531",
-			STARTUP_HEALTHCHECK_MODEL: "gpt-5.6-luna",
-		}).startupHealthcheckModel,
-		"gpt-5.6-luna",
-	)
-	assert.throws(
-		() =>
-			loadConfig({
-				UPSTREAMS: "http://127.0.0.1:10531",
-				STARTUP_HEALTHCHECK_MODEL: "modelo no válido",
-			}),
-		/STARTUP_HEALTHCHECK_MODEL/,
-	)
-	assert.equal(
 		loadConfig({ UPSTREAMS: "http://127.0.0.1:10531" }).clientErrorFailureThreshold,
 		5,
 	)
@@ -156,25 +137,7 @@ test("valida upstreams y reglas de estado", () => {
 			}),
 		/RUNTIME_FAILOVER debe ser true o false/,
 	)
-	assert.equal(
-		loadConfig({ UPSTREAMS: "http://127.0.0.1:10531" }).startupHealthcheckEnabled,
-		true,
-	)
-	assert.equal(
-		loadConfig({
-			UPSTREAMS: "http://127.0.0.1:10531",
-			STARTUP_HEALTHCHECK_ENABLED: "false",
-		}).startupHealthcheckEnabled,
-		false,
-	)
-	assert.throws(
-		() =>
-			loadConfig({
-				UPSTREAMS: "http://127.0.0.1:10531",
-				STARTUP_HEALTHCHECK_ENABLED: "1",
-			}),
-		/STARTUP_HEALTHCHECK_ENABLED debe ser true o false/,
-	)
+
 })
 
 test("formatea los logs con la fecha local indicada por TZ", () => {
@@ -199,231 +162,14 @@ test("formatea los logs con la fecha local indicada por TZ", () => {
 	])
 })
 
-test("omite completamente la validación inicial cuando está desactivada", async () => {
-	const events = []
-	let checkerCalls = 0
-	const logger = {
-		info: (event, details) => events.push({ level: "info", event, details }),
-		warn: (event, details) => events.push({ level: "warn", event, details }),
-		error: (event, details) => events.push({ level: "error", event, details }),
-	}
-	const config = loadConfig({
-		UPSTREAMS: "principal=http://127.0.0.1:10531",
-		STARTUP_HEALTHCHECK_ENABLED: "false",
-	})
-
-	const results = await validateUpstreamsAtStartup(config, {
-		logger,
-		checker: async () => {
-			checkerCalls += 1
-			throw new Error("no debe ejecutarse")
-		},
-	})
-
-	assert.deepEqual(results, [])
-	assert.equal(checkerCalls, 0)
-	assert.deepEqual(events, [
-		{
-			level: "warn",
-			event: "upstream_healthcheck_skipped",
-			details: {
-				upstreams: 1,
-				message: "La validación inicial está desactivada",
-			},
-		},
-	])
-})
-
-test("comprueba todos los upstreams al arrancar y genera un resumen", async (t) => {
-	const paths = []
-	const healthy = await startUpstream(async (request, response) => {
-		paths.push(request.url)
-		if (request.url === "/v1/models") {
-			json(response, 200, { data: [{ id: "gpt-image-2" }, { id: "test-model" }] })
-			return
-		}
-		const payload = JSON.parse(await readBody(request))
-		assert.equal(payload.model, "test-model")
-		assert.match(payload.messages[0].content, /responde única y exactamente con la palabra OK/)
-		json(response, 200, { choices: [{ message: { content: "OK" } }] })
-	})
-	const unhealthy = await startUpstream((request, response) => {
-		paths.push(request.url)
-		if (request.url === "/v1/models") {
-			json(response, 200, { data: [{ id: "gpt-image-2" }, { id: "test-model" }] })
-			return
-		}
-		json(response, 500, { error: { message: "usage limit reached" } })
-	})
-	t.after(async () => Promise.all([close(healthy.server), close(unhealthy.server)]))
-
-	const events = []
-	const logger = {
-		info: (event, details) => events.push({ level: "info", event, details }),
-		warn: (event, details) => events.push({ level: "warn", event, details }),
-		error: (event, details) => events.push({ level: "error", event, details }),
-	}
-	const config = loadConfig({
-		UPSTREAMS: `${healthy.url} | ${unhealthy.url}`,
-		STARTUP_HEALTHCHECK_TIMEOUT_MS: "1000",
-	})
-	const results = await checkUpstreams(config, { logger })
-
-	assert.deepEqual(paths.sort(), [
-		"/v1/chat/completions",
-		"/v1/chat/completions",
-		"/v1/chat/completions",
-		"/v1/chat/completions",
-		"/v1/models",
-		"/v1/models",
-		"/v1/models",
-		"/v1/models",
-	])
-	assert.equal(results[0].healthy, true)
-	assert.equal(results[0].alias, "upstream-1")
-	assert.equal(results[0].status, 200)
-	assert.equal(results[0].model, "test-model")
-	assert.equal(results[0].response, "OK")
-	assert.equal(results[1].healthy, false)
-	assert.equal(results[1].failures, 3)
-	assert.equal(results[1].status, 500)
-	assert.equal(results[1].stage, "chat_completion")
-	assert.equal(events.filter(({ event }) => event === "upstream_healthcheck_attempt_failed").length, 0)
-	assert.equal(
-		events.filter(({ event, details }) => event === "upstream_healthcheck_ok" && details.healthy)
-			.length,
-		1,
-	)
-	assert.equal(
-		events.filter(
-			({ event, details }) => event === "upstream_healthcheck_failed" && !details.healthy,
-		).length,
-		1,
-	)
-	assert.deepEqual(events.at(-1), {
-		level: "info",
-		event: "upstream_healthcheck_complete",
-		details: { healthy: 1, total: 2 },
-	})
-})
-
-test("la validación inicial reintenta hasta el umbral y acepta un éxito posterior", async (t) => {
-	let completionCalls = 0
-	const upstream = await startUpstream((_request, response) => {
-		completionCalls += 1
-		if (completionCalls < 3) {
-			json(response, 500, { error: { message: "fallo temporal" } })
-			return
-		}
-		json(response, 200, { choices: [{ message: { content: "OK" } }] })
-	})
-	t.after(async () => close(upstream.server))
-
-	const config = loadConfig({
-		UPSTREAMS: `temporal=${upstream.url}`,
-		STARTUP_HEALTHCHECK_MODEL: "test-model",
-		STARTUP_HEALTHCHECK_TIMEOUT_MS: "1000",
-		UPSTREAM_FAILURE_THRESHOLD: "3",
-	})
-	const results = await checkUpstreams(config)
-
-	assert.equal(completionCalls, 3)
-	assert.equal(results[0].healthy, true)
-	assert.equal(results[0].attempt, 3)
-	assert.equal(results[0].failures, 2)
-})
-
-test("una validación inicial agotada desactiva el upstream durante el cooldown", async (t) => {
+for (const delayedQuota of [false, true]) test(`abre el circuito tras desconexiones atribuibles y usa el siguiente upstream (quota gate=${delayedQuota})`, { timeout: 10000 }, async (t) => {
 	let firstCalls = 0
+	let arrived, accounted
+	let quotaArrived, releaseQuota, quotaCalls = 0
 	const first = await startUpstream((_request, response) => {
 		firstCalls += 1
-		json(response, 200, { upstream: 1 })
-	})
-	const second = await startUpstream((_request, response) => json(response, 200, { upstream: 2 }))
-	const events = []
-	const logger = {
-		info: (event, details) => events.push({ level: "info", event, details }),
-		warn: (event, details) => events.push({ level: "warn", event, details }),
-		error: (event, details) => events.push({ level: "error", event, details }),
-	}
-	const router = await startRouter(
-		[`sin-cuota=${first.url}`, `disponible=${second.url}`],
-		{ UPSTREAM_COOLDOWN: "10m" },
-		{
-			initialUpstreamHealth: [
-				{ healthy: false, status: 500, failures: 3 },
-				{ healthy: true, status: 200 },
-			],
-			logger,
-		},
-	)
-	t.after(async () => Promise.all([close(router.server), close(first.server), close(second.server)]))
+		arrived() // Keep the response pending until this attributable client abort.
 
-	const response = await fetch(`${router.url}/v1/models`)
-
-	assert.equal(response.status, 200)
-	assert.equal(firstCalls, 0)
-	assert.equal(response.headers.get("x-router-upstream-index"), "2")
-	assert.equal(response.headers.get("x-router-upstream-alias"), "disponible")
-	assert.deepEqual(await response.json(), { upstream: 2 })
-	const disabled = events.find(({ event }) => event === "upstream_initially_disabled")
-	assert.equal(disabled?.level, "warn")
-	assert.deepEqual(
-		{
-			index: disabled?.details.index,
-			alias: disabled?.details.alias,
-			reason: disabled?.details.reason,
-			failures: disabled?.details.failures,
-			threshold: disabled?.details.threshold,
-			cooldownMs: disabled?.details.cooldownMs,
-		},
-		{
-			index: 1,
-			alias: "sin-cuota",
-			reason: "startup_healthcheck_failed",
-			failures: 3,
-			threshold: 3,
-			cooldownMs: 600000,
-		},
-	)
-	assert.match(disabled?.details.disabledUntil, /^\d{4}-\d{2}-\d{2}T/)
-})
-
-test("todos los upstreams agotados al inicio responden 503 sin volver a probarlos", async (t) => {
-	let upstreamCalls = 0
-	const first = await startUpstream((_request, response) => {
-		upstreamCalls += 1
-		json(response, 500, { upstream: 1 })
-	})
-	const second = await startUpstream((_request, response) => {
-		upstreamCalls += 1
-		json(response, 500, { upstream: 2 })
-	})
-	const router = await startRouter(
-		[first.url, second.url],
-		{ UPSTREAM_COOLDOWN: "10m" },
-		{
-			initialUpstreamHealth: [{ healthy: false }, { healthy: false }],
-		},
-	)
-	t.after(async () => Promise.all([close(router.server), close(first.server), close(second.server)]))
-
-	const response = await fetch(`${router.url}/v1/models`)
-	const payload = await response.json()
-
-	assert.equal(response.status, 503)
-	assert.equal(upstreamCalls, 0)
-	assert.equal(response.headers.get("retry-after"), "600")
-	assert.equal(payload.error.code, "all_upstreams_temporarily_disabled")
-})
-
-test("abre el circuito tras desconexiones atribuibles y usa el siguiente upstream", async (t) => {
-	let firstCalls = 0
-	const first = await startUpstream((_request, response) => {
-		firstCalls += 1
-		const timer = setTimeout(() => json(response, 200, { upstream: 1 }), 1000)
-		timer.unref()
-		response.once("close", () => clearTimeout(timer))
 	})
 	const second = await startUpstream((_request, response) => json(response, 200, { upstream: 2 }))
 
@@ -436,6 +182,7 @@ test("abre el circuito tras desconexiones atribuibles y usa el siguiente upstrea
 		info: (event, details) => events.push({ level: "info", event, details }),
 		warn: (event, details) => {
 			events.push({ level: "warn", event, details })
+			if (event === "upstream_client_error") accounted(details)
 			if (event === "upstream_circuit_open" && details.reason === "CLIENT_ERROR_THRESHOLD") {
 				resolveCircuitOpened()
 			}
@@ -448,30 +195,44 @@ test("abre el circuito tras desconexiones atribuibles y usa el siguiente upstrea
 			CLIENT_ERROR_FAILURE_THRESHOLD: "2",
 			UPSTREAM_COOLDOWN: "10m",
 		},
-		{ logger },
+		{ logger, ...(delayedQuota ? { quotaFetchImpl: async () => {
+			if (++quotaCalls === 1) {
+				quotaArrived()
+				await new Promise(resolve => { releaseQuota = resolve })
+			}
+			return Response.json({ rateLimits: null })
+		} } : {}) },
 	)
 	t.after(async () => Promise.all([close(router.server), close(first.server), close(second.server)]))
 
-	const abortClientRequest = () =>
-		new Promise((resolve) => {
-			const request = http.request(`${router.url}/v1/chat/completions`, {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-			})
-			request.once("error", resolve)
-			request.once("close", resolve)
-			request.end('{"model":"test"}')
-			setTimeout(() => request.destroy(), 25).unref()
+	const abortClientRequest = async (expectedCount) => {
+		const quotaArrival = new Promise(resolve => { quotaArrived = resolve })
+		const arrival = new Promise(resolve => { arrived = resolve })
+		const accounting = new Promise(resolve => { accounted = resolve })
+		const request = http.request(`${router.url}/v1/chat/completions`, {
+			method: "POST", headers: { "content-type": "application/json" },
 		})
+		request.on("error", () => {})
+		const closed = new Promise(resolve => request.once("close", resolve))
+		request.end('{"model":"test"}')
+		if (delayedQuota && expectedCount === 1) {
+			await quotaArrival
+			assert.equal(firstCalls, 0) // Quota work may delay selection arbitrarily.
+			releaseQuota()
+		}
+		await arrival
+		assert.equal(firstCalls, expectedCount)
+		request.destroy()
+		const details = await accounting
+		assert.equal(details.clientErrors, expectedCount)
+		assert.equal(details.reason, "ECONNRESET")
+		await closed
+		return details.requestId
+	}
 
-	await abortClientRequest()
-	await abortClientRequest()
-	await Promise.race([
-		circuitOpened,
-		new Promise((_, reject) =>
-			setTimeout(() => reject(new Error("No se abrió el circuito")), 1000),
-		),
-	])
+	const ids = [await abortClientRequest(1), await abortClientRequest(2)]
+	assert.equal(new Set(ids).size, 2)
+	await circuitOpened
 
 	const response = await fetch(`${router.url}/v1/models`)
 
@@ -551,6 +312,7 @@ test("cuenta un ECONNRESET de clientError después de las cabeceras y cambia de 
 	activeRequest.on("error", () => {})
 	const reset = new Error("socket hang up")
 	reset.code = "ECONNRESET"
+	const expectedClientAddress = `${serverSocket.remoteAddress}:${serverSocket.remotePort}`
 	router.server.emit("clientError", reset, serverSocket)
 	await Promise.race([
 		circuitOpened,
@@ -571,6 +333,10 @@ test("cuenta un ECONNRESET de clientError después de las cabeceras y cambia de 
 		"ECONNRESET",
 	)
 	assert.equal(events.filter(({ event }) => event === "client_error").length, 0)
+	const resetEvents = events.filter(({ event }) => ["upstream_client_error", "upstream_circuit_open"].includes(event))
+	assert.equal(resetEvents.length, 2)
+	assert.ok(resetEvents.every(({ details }) => details.clientAddress === expectedClientAddress))
+	assert.equal(new Set(resetEvents.map(({ details }) => details.requestId)).size, 1)
 })
 
 test("identifica y omite un clientError concurrente de una generación antigua", async (t) => {
@@ -1043,6 +809,7 @@ test("abre el circuito tras tres errores, omite el upstream y lo prueba después
 		index: 1,
 		alias: "principal",
 		state: "closed",
+		recoveryOrigin: null,
 		failures: 0,
 		clientErrors: 0,
 		remainingMs: 0,
@@ -1157,7 +924,7 @@ test("protege las rutas proxificadas y no reenvía la clave del router", async (
 	const health = await fetch(`${router.url}/health`)
 	assert.equal(health.status, 200)
 	const unauthorizedStatus = await fetch(`${router.url}/router/status`)
-	assert.equal(unauthorizedStatus.status, 401)
+	assert.equal(unauthorizedStatus.status, 200)
 
 	const unauthorized = await fetch(`${router.url}/v1/models`)
 	assert.equal(unauthorized.status, 401)
@@ -1241,3 +1008,101 @@ test("transmite respuestas por fragmentos sin alterar su contenido", async (t) =
 	assert.equal(response.headers.get("content-type"), "text/event-stream")
 	assert.equal(await response.text(), "data: uno\n\ndata: [DONE]\n\n")
 })
+
+test('clientAddress socket peer survives failover events, JSON and SSE; XFF spoof ignored',async(t)=>{
+ const {createLogHub}=await import('../src/observability.mjs')
+ const first=await startUpstream((_req,res)=>json(res,500,{error:'mock'}))
+ const second=await startUpstream((_req,res)=>json(res,200,{ok:true}))
+ const hub=createLogHub(),lines=[]
+ const logger=createLogger({output:line=>lines.push(line),onRecord:hub.publish})
+ const router=await startRouter([`a=${first.url}`,`b=${second.url}`],{UPSTREAM_FAILURE_THRESHOLD:'1'},{logger,logHub:hub})
+ t.after(async()=>{hub.close();await Promise.all([close(router.server),close(first.server),close(second.server)])})
+ let peer
+ router.server.once('connection',socket=>{peer=`${socket.remoteAddress}:${socket.remotePort}`})
+ const result=await new Promise((resolve,reject)=>{
+  const req=http.get(router.url+'/v1/models',{headers:{'x-forwarded-for':'203.0.113.99','forwarded':'for="[2001:db8::bad]:443"'}},res=>{res.resume();res.once('end',()=>resolve(res))});req.once('error',reject)
+ })
+ assert.equal(result.statusCode,200)
+ const requestId=result.headers['x-router-request-id']
+ const records=lines.map(line=>JSON.parse(line.slice(line.indexOf('{')))).filter(r=>r.requestId===requestId)
+ assert.equal(records.length,4) // failure, circuit open, retry, completion: no extra event.
+ assert.ok(records.every(r=>r.clientAddress===peer))
+ assert.ok(!JSON.stringify(records).includes('203.0.113.99'))
+ const controller=new AbortController()
+ const response=await fetch(router.url+'/router/logs',{signal:controller.signal})
+ const reader=response.body.getReader();let text=''
+ while((text.match(/\n\n/g)||[]).length<4)text+=new TextDecoder().decode((await reader.read()).value)
+ controller.abort()
+ const streamed=text.trim().split('\n\n').map(frame=>JSON.parse(frame.split('data: ')[1])).filter(r=>r.requestId===requestId)
+ assert.equal(streamed.length,records.length);assert.ok(streamed.every(r=>r.clientAddress===peer))
+})
+
+test('clientAddress retained after upstream streaming reset without extra failover',async(t)=>{
+ const events=[];let secondCalls=0
+ const first=await startUpstream((_req,res)=>{
+  res.writeHead(200);res.write('partial')
+  const timer=setTimeout(()=>res.destroy(),20);res.once('close',()=>clearTimeout(timer))
+ })
+ const second=await startUpstream((_req,res)=>{secondCalls++;json(res,200,{ok:true})})
+ const logger=Object.fromEntries(['info','warn','error'].map(level=>[level,(event,details)=>events.push({event,details})]))
+ const router=await startRouter([first.url,second.url],{}, {logger})
+ t.after(async()=>Promise.all([close(router.server),close(first.server),close(second.server)]))
+ let peer;router.server.once('connection',socket=>{peer=`${socket.remoteAddress}:${socket.remotePort}`})
+ await new Promise((resolve,reject)=>{
+  const req=http.get(router.url+'/v1/models',res=>{res.resume();res.once('aborted',resolve);res.once('end',()=>reject(new Error('expected stream reset')));res.on('error',()=>{})});req.once('error',reject)
+ })
+ // Pipeline teardown aborts the client controller; this existing branch logs
+ // the attributable reset once, not an additional response_stream_error.
+ for(let i=0;i<20&&!events.some(e=>e.event==='upstream_client_error');i++)await new Promise(r=>setTimeout(r,5))
+ assert.equal(secondCalls,0)
+ const related=events.filter(e=>e.details.requestId)
+ assert.deepEqual(related.map(e=>e.event),['upstream_client_error'])
+ assert.ok(related.every(e=>e.details.clientAddress===peer))
+ assert.equal(new Set(related.map(e=>e.details.requestId)).size,1)
+})
+
+test('normalized slash/dot targets keep configured authority and authentication',async t=>{
+ let foreignCalls=0;const paths=[];
+ const foreign=await startUpstream((q,s)=>{foreignCalls++;s.end('foreign')});
+ const upstream=await startUpstream((q,s)=>{paths.push(q.url);s.end('fixed')});
+ const router=await startRouter([upstream.url],{ROUTER_API_KEY:'mock-audit-key'});
+ t.after(()=>Promise.all([close(router.server),close(upstream.server),close(foreign.server)]));
+ const raw=async(path,authorized=true)=>new Promise((resolve,reject)=>{
+  const u=new URL(router.url);const q=http.get({host:u.hostname,port:u.port,path,headers:authorized?{authorization:'Bearer mock-audit-key'}:{}},async s=>resolve({status:s.statusCode,body:await readBody(s)}));q.on('error',reject);
+ });
+ const authority=new URL(foreign.url).host;
+ for(const path of [`/x/..//${authority}/proof?q=1`,`/x/%2e%2e//${authority}/proof?q=1`]){
+  assert.equal((await raw(path,false)).status,401);
+  assert.deepEqual(await raw(path),{status:200,body:'fixed'});
+ }
+ assert.equal((await raw(`//${authority}/proof`)).status,400);
+ assert.equal((await raw(`${foreign.url}/proof`)).status,400);
+ assert.equal(foreignCalls,0);assert.deepEqual(paths,[`//${authority}/proof?q=1`,`//${authority}/proof?q=1`]);
+});
+
+test('active non-reset parser clientError never penalizes upstream',async t=>{
+ let arrived;const arrival=new Promise(r=>arrived=r);const events=[];
+ const upstream=await startUpstream(()=>arrived());
+ const router=await startRouter([upstream.url],{CLIENT_ERROR_FAILURE_THRESHOLD:'1'},{logger:Object.fromEntries(['info','warn','error'].map(k=>[k,(event,details)=>events.push({event,details})]))});
+ t.after(()=>Promise.all([close(router.server),close(upstream.server)]));
+ let socket;router.server.once('connection',s=>socket=s);
+ const request=http.get(router.url+'/v1/models',s=>s.resume());request.on('error',()=>{});
+ await arrival;router.server.emit('clientError',Object.assign(new Error('mock'),{code:'HPE_INVALID_METHOD'}),socket);
+ await new Promise(r=>setTimeout(r,30));request.destroy();
+ const state=(await (await fetch(router.url+'/router/status')).json()).upstreams[0];
+ assert.equal(state.failures,0);assert.equal(state.clientErrors,0);assert.equal(state.state,'closed');
+ assert.ok(!events.some(e=>e.event==='upstream_client_error'||e.event==='upstream_circuit_open'));
+});
+
+test('stream inactivity timeout is generic failure without post-header retry',async t=>{
+ let secondCalls=0;const events=[];
+ const first=await startUpstream((q,s)=>{s.writeHead(200,{'content-type':'text/event-stream'});s.write('data: {}\n\n')});
+ const second=await startUpstream((q,s)=>{secondCalls++;s.end('fallback')});
+ const router=await startRouter([first.url,second.url],{UPSTREAM_TIMEOUT_MS:'50',UPSTREAM_FAILURE_THRESHOLD:'1'},{logger:Object.fromEntries(['info','warn','error'].map(k=>[k,(event,details)=>events.push({event,details})]))});
+ t.after(()=>Promise.all([close(router.server),close(first.server),close(second.server)]));
+ await new Promise((resolve,reject)=>{const q=http.get(router.url+'/v1/models',s=>{s.resume();s.on('error',()=>{});s.on('close',resolve)});q.on('error',reject)});
+ const state=(await (await fetch(router.url+'/router/status')).json()).upstreams[0];
+ assert.equal(state.state,'open');assert.equal(state.failures,1);assert.equal(state.clientErrors,0);assert.equal(secondCalls,0);
+ assert.ok(events.some(e=>e.event==='upstream_failure'&&e.details.reason==='STREAM_UPSTREAM_TIMEOUT'));
+ assert.ok(!events.some(e=>e.event==='upstream_client_error'));
+});

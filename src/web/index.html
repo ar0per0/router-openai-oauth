@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none';script-src 'self';style-src 'self';connect-src 'self';base-uri 'none';frame-ancestors 'none';form-action 'none'">
+<title>Router</title>
+<link rel="stylesheet" href="/router/style.css">
+<script src="/router/app.js" defer></script>
+<script src="/router/pricing.js" defer></script>
+<script src="/router/usage-chart.js" defer></script>
+</head>
+<body>
+<main>
+<div id="router-panel">
+<h1>Router</h1>
+<p id="upstream-summary" role="status">Sin datos.</p>
+<button id="refresh" type="button">Refrescar</button>
+<p id="account-status" role="status">Sin datos. Pulsa Refrescar.</p>
+<section id="accounts" aria-label="Cuentas"></section>
+</div>
+<section aria-labelledby="log-title">
+<h2 id="log-title">Visor de logs (máximo 200 líneas)</h2>
+<button id="start" type="button">Start</button>
+<button id="stop" type="button" disabled>Stop</button>
+<p id="log-status" role="status" aria-live="polite"></p>
+<p>Stop solo desconecta este visor; no detiene el router. Solo se muestran metadatos JSON permitidos.</p>
+<pre id="logs" aria-live="off"></pre>
+</section>
+<section id="usage-panel" aria-labelledby="usage-title">
+<h2 id="usage-title">Uso de tokens</h2>
+<div class="usage-controls">
+<label>Upstream / cuenta <select id="usage-account"><option value="">Todas las cuentas</option></select></label>
+<label>Métrica <select id="usage-metric">
+<option value="totalTokens">totalTokens</option><option value="inputTokens">inputTokens</option><option value="outputTokens">outputTokens</option><option value="cachedTokens">cachedTokens</option><option value="reasoningTokens">reasoningTokens</option>
+</select></label>
+<div class="usage-model-control">
+<label for="usage-model">LLM para simular precio</label>
+<input id="usage-model" type="text" role="combobox" autocomplete="off" maxlength="256" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false" aria-controls="usage-model-options" aria-describedby="usage-pricing-status" placeholder="Sin simulación · nombre o proveedor">
+<ul id="usage-model-options" role="listbox" aria-label="LLM para simular precio" hidden></ul>
+</div>
+<label>Desde <input id="usage-from" type="text" inputmode="numeric" placeholder="dd/mm/aaaa" maxlength="10" aria-describedby="usage-status"></label><label>Hasta <input id="usage-to" type="text" inputmode="numeric" placeholder="dd/mm/aaaa" maxlength="10" aria-describedby="usage-status"></label>
+<button id="usage-refresh" type="button">Refrescar</button>
+</div>
+<p id="usage-pricing-status" role="status" aria-live="polite"></p>
+<p id="usage-status" role="status" aria-live="polite"></p>
+<p class="usage-summary"><span id="usage-total"></span><span id="usage-total-breakdown" class="usage-breakdown" aria-label="Desglose del período"></span></p>
+<div id="usage-chart"></div>
+<p class="usage-summary" role="status" aria-live="polite"><span id="usage-tooltip">Selecciona un día con puntero, foco o toque.</span><span id="usage-day-breakdown" class="usage-breakdown" aria-label="Desglose del día seleccionado"></span></p>
+<ul id="usage-fallback" class="sr-only" aria-label="Uso diario de tokens"></ul>
+</section>
+</main>
+</body>
+</html>

@@ -1,8 +1,39 @@
+import { createPricingReader } from "./pricing-catalog.mjs"
 import http from "node:http"
+import { AsyncLocalStorage } from "node:async_hooks"
+import { formatClientAddress } from "./client-address.mjs"
 import https from "node:https"
-import { randomInt, randomUUID, timingSafeEqual } from "node:crypto"
+import { randomUUID, timingSafeEqual } from "node:crypto"
 import { pipeline } from "node:stream/promises"
 import { isRetryableStatus } from "./config.mjs"
+import { readFileSync } from "node:fs"
+import { createQuotaReader, quotaBlockedUntil, quotaAvailable } from "./observability.mjs"
+
+import { createUsageObserver } from "./usage.mjs"
+import { parseSummaryQuery } from './usage-summary.mjs'
+import { parseUsageQuery } from "./usage-store.mjs"
+
+const panelAssets = new Map([
+ ["/router/", ["index.html", "text/html; charset=utf-8"]],
+ ["/router/pricing.js", ["pricing.js", "text/javascript; charset=utf-8"]],
+ ["/router/usage-chart.js", ["usage-chart.js", "text/javascript; charset=utf-8"]],
+ ["/router/app.js", ["app.js", "text/javascript; charset=utf-8"]],
+ ["/router/style.css", ["style.css", "text/css; charset=utf-8"]],
+])
+const panelHeaders = {
+ "cache-control": "no-store",
+ "x-content-type-options": "nosniff",
+ "referrer-policy": "no-referrer",
+ "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+}
+const validPanelOrigin = (request) => {
+ if (request.headers['sec-fetch-site'] === 'cross-site') return false
+ if (!request.headers.origin) return true
+ try {
+  const origin = new URL(request.headers.origin)
+  return origin.origin === `${request.socket.encrypted ? 'https' : 'http'}://${request.headers.host}`
+ } catch { return false }
+}
 
 const HOP_BY_HOP_HEADERS = new Set([
 	"connection",
@@ -197,7 +228,11 @@ const requestUpstream = ({
 	signal,
 }) =>
 	new Promise((resolve, reject) => {
-		const targetUrl = new URL(target, upstream)
+		// Assign path/query without resolving target as a new authority.
+		const targetUrl = new URL(upstream)
+		const queryIndex = target.indexOf("?")
+		targetUrl.pathname = queryIndex < 0 ? target : target.slice(0, queryIndex)
+		targetUrl.search = queryIndex < 0 ? "" : target.slice(queryIndex)
 		const transport = targetUrl.protocol === "https:" ? https : http
 		let settled = false
 		const timeoutError = () => {
@@ -235,173 +270,18 @@ const requestUpstream = ({
 		outgoing.end(body)
 	})
 
-class UpstreamValidationError extends Error {
-	constructor(code, { status, stage } = {}) {
-		super(code)
-		this.code = code
-		this.status = status
-		this.stage = stage
-	}
-}
-
-const responseJson = async (response, stage) => {
-	if (!response.ok) {
-		await response.body?.cancel()
-		throw new UpstreamValidationError(`HTTP_${response.status}`, {
-			status: response.status,
-			stage,
-		})
-	}
-	try {
-		return await response.json()
-	} catch {
-		throw new UpstreamValidationError("INVALID_JSON", { status: response.status, stage })
-	}
-}
-
-const createValidationPrompt = () => {
-	const first = randomInt(12, 100)
-	const second = randomInt(11, 50)
-	const subtract = randomInt(20, 250)
-	const result = first * second - subtract
-	return `Realiza esta comprobación internamente: calcula (${first} × ${second}) - ${subtract} y comprueba que el resultado sea ${result}. Si es correcto, responde única y exactamente con la palabra OK, en mayúsculas, sin comillas, explicaciones, puntuación ni espacios adicionales. Si no es correcto, responde ERROR.`
-}
-
-const checkUpstreamOnce = async (config, upstream, fetchImpl) => {
-	const signal = AbortSignal.timeout(config.startupHealthcheckTimeoutMs)
-	let model = config.startupHealthcheckModel
-	if (!model) {
-		const modelsResponse = await fetchImpl(new URL("/v1/models", upstream.url), {
-			headers: { authorization: "Bearer openai-oauth" },
-			redirect: "manual",
-			signal,
-		})
-		const models = await responseJson(modelsResponse, "models")
-		model = models.data
-			?.map(({ id }) => id)
-			.find((id) => typeof id === "string" && !/image/i.test(id))
-		if (!model) throw new UpstreamValidationError("NO_MODELS", { stage: "models" })
-	}
-
-	const completionResponse = await fetchImpl(
-		new URL("/v1/chat/completions", upstream.url),
-		{
-			method: "POST",
-			headers: {
-				authorization: "Bearer openai-oauth",
-				"content-type": "application/json",
-			},
-			body: JSON.stringify({
-				model,
-				messages: [{ role: "user", content: createValidationPrompt() }],
-				max_completion_tokens: 128,
-			}),
-			redirect: "manual",
-			signal,
-		},
-	)
-	const completion = await responseJson(completionResponse, "chat_completion")
-	const answer = completion.choices?.[0]?.message?.content
-	if (answer !== "OK") {
-		throw new UpstreamValidationError("UNEXPECTED_RESPONSE", {
-			status: completionResponse.status,
-			stage: "chat_completion",
-		})
-	}
-	return { model, status: completionResponse.status }
-}
-
-export const checkUpstreams = async (config, { logger = silentLogger, fetchImpl = fetch } = {}) => {
-	const results = await Promise.all(
-		config.upstreams.map(async (upstream, index) => {
-			const startedAt = Date.now()
-			let lastError
-			for (let attempt = 1; attempt <= config.upstreamFailureThreshold; attempt += 1) {
-				try {
-					const { model, status } = await checkUpstreamOnce(config, upstream, fetchImpl)
-					const result = {
-						index: index + 1,
-						alias: upstream.alias,
-						upstream: upstream.url.origin,
-						model,
-						status,
-						healthy: true,
-						attempt,
-						maxAttempts: config.upstreamFailureThreshold,
-						failures: attempt - 1,
-						response: "OK",
-						durationMs: Date.now() - startedAt,
-					}
-					logger.info("upstream_healthcheck_ok", result)
-					return result
-				} catch (error) {
-					lastError = error
-				}
-			}
-
-			const result = {
-				index: index + 1,
-				alias: upstream.alias,
-				upstream: upstream.url.origin,
-				healthy: false,
-				failures: config.upstreamFailureThreshold,
-				error: errorCode(lastError),
-				...(lastError?.status ? { status: lastError.status } : {}),
-				...(lastError?.stage ? { stage: lastError.stage } : {}),
-				durationMs: Date.now() - startedAt,
-			}
-			logger.warn("upstream_healthcheck_failed", result)
-			return result
-		}),
-	)
-
-	logger.info("upstream_healthcheck_complete", {
-		healthy: results.filter((result) => result.healthy).length,
-		total: results.length,
-	})
-	return results
-}
-
-export const validateUpstreamsAtStartup = async (
-	config,
-	{ logger = silentLogger, checker = checkUpstreams } = {},
-) => {
-	if (!config.startupHealthcheckEnabled) {
-		logger.warn("upstream_healthcheck_skipped", {
-			upstreams: config.upstreams.length,
-			message: "La validación inicial está desactivada",
-		})
-		return []
-	}
-
-	logger.info("upstream_healthcheck_started", {
-		upstreams: config.upstreams.length,
-		model: config.startupHealthcheckModel || "auto",
-		timeoutMs: config.startupHealthcheckTimeoutMs,
-		maxAttempts: config.upstreamFailureThreshold,
-	})
-	return checker(config, { logger })
-}
-
-const createCircuitBreaker = (config, logger, initialUpstreamHealth = []) => {
-	const initializedAt = Date.now()
-	const states = config.upstreams.map((_upstream, index) => {
-		const initiallyHealthy = initialUpstreamHealth[index]?.healthy !== false
-		const initialFailures = initiallyHealthy
-			? 0
-			: Math.min(
-				initialUpstreamHealth[index]?.failures || config.upstreamFailureThreshold,
-				config.upstreamFailureThreshold,
-			)
-		const initiallyOpen = initialFailures >= config.upstreamFailureThreshold
-		return {
-			consecutiveFailures: initialFailures,
-			consecutiveClientErrors: 0,
-			openUntil: initiallyOpen ? initializedAt + config.upstreamCooldownMs : 0,
-			probeInFlight: false,
-			generation: initiallyOpen ? 1 : 0,
-		}
-	})
+export const createCircuitBreaker = (config, logger, quotaSnapshot = () => null) => {
+	// No startup probes: eligibility starts closed, not as a claim of OAuth health.
+	const states = config.upstreams.map(() => ({
+		consecutiveFailures: 0,
+		consecutiveClientErrors: 0,
+		openUntil: 0,
+		probeInFlight: false,
+		probeReservation: null,
+		quotaUntil: 0,
+		quotaRecovery: false,
+		generation: 0,
+	}))
 
 	const details = (index) => ({
 		index: index + 1,
@@ -409,36 +289,43 @@ const createCircuitBreaker = (config, logger, initialUpstreamHealth = []) => {
 		upstream: config.upstreams[index].url.origin,
 	})
 
-	for (let index = 0; index < states.length; index += 1) {
-		if (initialUpstreamHealth[index]?.healthy !== false) continue
-		if (states[index].openUntil > 0) {
-			logger.warn("upstream_initially_disabled", {
-				...details(index),
-				reason: "startup_healthcheck_failed",
-				failures: states[index].consecutiveFailures,
-				threshold: config.upstreamFailureThreshold,
-				cooldownMs: config.upstreamCooldownMs,
-				disabledUntil: new Date(states[index].openUntil).toISOString(),
-			})
-			continue
-		}
-		logger.warn("upstream_initial_failure", {
-			...details(index),
-			reason: "startup_healthcheck_failed",
-			failures: states[index].consecutiveFailures,
-			threshold: config.upstreamFailureThreshold,
-		})
-	}
+ // Pure effective quota view shared by readonly snapshots and routing boundaries.
+ // Positive evidence never clears generic recovery or detaches an active probe.
+ const effectiveQuota = (index, now) => {
+  const state = states[index], account = quotaSnapshot()?.accounts[index]
+  const until = quotaBlockedUntil(account, now)
+  if (until > now) return { until, recovery: true }
+  if (quotaAvailable(account) && !state.probeInFlight) return { until: 0, recovery: false }
+  return { until: state.quotaUntil, recovery: state.quotaRecovery }
+ }
+ const syncQuota = (index) => {
+  const state = states[index], now = Date.now()
+  const quota = effectiveQuota(index, now)
+  if (quota.until === state.quotaUntil && quota.recovery === state.quotaRecovery) return
+  const blocking = quota.until > now
+  state.quotaUntil = quota.until
+  state.quotaRecovery = quota.recovery
+  // New blocks invalidate all prior completions. Quota-only release invalidates
+  // old traffic; generic recovery keeps its reservation and counters untouched.
+  if (blocking || state.openUntil === 0) {
+   state.generation += 1
+  }
+  logger[blocking ? 'warn' : 'info'](blocking ? 'upstream_quota_blocked' : 'upstream_quota_released', {
+   ...details(index), ...(blocking ? { disabledUntil: new Date(quota.until).toISOString() } : {}),
+  })
+ }
 
 	const acquire = (index, requestId) => {
+		syncQuota(index)
 		const state = states[index]
 		const now = Date.now()
-		if (state.openUntil > now) {
-			const remainingMs = state.openUntil - now
+		const blockedUntil = Math.max(state.openUntil, state.quotaUntil)
+		if (blockedUntil > now) {
+			const remainingMs = blockedUntil - now
 			return { allowed: false, remainingMs }
 		}
 
-		if (state.openUntil > 0) {
+		if (state.openUntil > 0 || state.quotaRecovery) {
 			if (state.probeInFlight) {
 				return { allowed: false, remainingMs: 1000 }
 			}
@@ -447,14 +334,24 @@ const createCircuitBreaker = (config, logger, initialUpstreamHealth = []) => {
 				requestId,
 				...details(index),
 			})
-			return { allowed: true, recoveryProbe: true, generation: state.generation }
+			const reservation = { allowed: true, recoveryProbe: true, generation: state.generation }
+			state.probeReservation = reservation
+			return reservation
 		}
 
 		return { allowed: true, recoveryProbe: false, generation: state.generation }
 	}
 
+ const finishProbe = (state, reservation) => {
+  if (state.probeReservation !== reservation) return
+  state.probeReservation = null
+  state.probeInFlight = false
+ }
+
 	const succeeded = (index, requestId, reservation) => {
+		syncQuota(index)
 		const state = states[index]
+		finishProbe(state, reservation)
 		if (reservation.generation !== state.generation) return
 		const previousFailures = state.consecutiveFailures
 		const previousClientErrors = state.consecutiveClientErrors
@@ -462,6 +359,8 @@ const createCircuitBreaker = (config, logger, initialUpstreamHealth = []) => {
 		state.consecutiveFailures = 0
 		state.consecutiveClientErrors = 0
 		state.openUntil = 0
+		state.quotaUntil = 0
+		state.quotaRecovery = false
 		state.probeInFlight = false
 		if (recovered) {
 			logger.info("upstream_circuit_closed", {
@@ -485,6 +384,7 @@ const createCircuitBreaker = (config, logger, initialUpstreamHealth = []) => {
 
 	const failed = (index, requestId, reservation, reason) => {
 		const state = states[index]
+		finishProbe(state, reservation)
 		if (reservation.generation !== state.generation) {
 			return { ignored: true, opened: state.openUntil > Date.now() }
 		}
@@ -541,6 +441,7 @@ const createCircuitBreaker = (config, logger, initialUpstreamHealth = []) => {
 
 	const clientDisconnected = (index, requestId, reservation, reason) => {
 		const state = states[index]
+		finishProbe(state, reservation)
 		if (reservation.generation !== state.generation) {
 			return { ignored: true, opened: state.openUntil > Date.now() }
 		}
@@ -585,29 +486,27 @@ const createCircuitBreaker = (config, logger, initialUpstreamHealth = []) => {
 		}
 	}
 
-	const release = (index, reservation) => {
-		if (
-			reservation.recoveryProbe &&
-			reservation.generation === states[index].generation
-		) {
-			states[index].probeInFlight = false
-		}
-	}
+	const release = (index, reservation) => finishProbe(states[index], reservation)
 
 	const snapshot = (now = Date.now()) =>
 		states.map((state, index) => {
-			const remainingMs = Math.max(0, state.openUntil - now)
-			const circuitState =
-				state.openUntil === 0 ? "closed" : remainingMs > 0 ? "open" : "half_open"
+			const quota = effectiveQuota(index, now)
+			const until = Math.max(state.openUntil, quota.until)
+			const remainingMs = Math.max(0, until - now)
+			const circuitState = remainingMs > 0 ? "open" :
+				state.openUntil > 0 || quota.recovery ? "half_open" : "closed"
 			return {
 				index: index + 1,
 				alias: config.upstreams[index].alias,
 				state: circuitState,
+				recoveryOrigin: circuitState === "closed" ? null :
+					state.openUntil > 0 && quota.recovery ? "generic_and_quota" :
+					state.openUntil > 0 ? "generic" : "quota",
 				failures: state.consecutiveFailures,
 				clientErrors: state.consecutiveClientErrors,
 				remainingMs,
 				disabledUntil:
-					circuitState === "open" ? new Date(state.openUntil).toISOString() : null,
+					circuitState === "open" ? new Date(until).toISOString() : null,
 				probeInFlight: state.probeInFlight,
 			}
 		})
@@ -617,14 +516,26 @@ const createCircuitBreaker = (config, logger, initialUpstreamHealth = []) => {
 
 export const createRouterServer = (
 	config,
-	{ logger = silentLogger, initialUpstreamHealth = [] } = {},
+	{ logger = silentLogger, logHub, usageStore, quotaFetchImpl = fetch, pricingFetchImpl = fetch } = {},
 ) => {
-	const circuitBreaker = createCircuitBreaker(config, logger, initialUpstreamHealth)
+	// Async-local correlation retains the captured peer across awaits, streaming and
+	// breaker callbacks without a request-ID registry or additional log events.
+	const logContext = new AsyncLocalStorage()
+	const baseLogger = logger
+	logger = Object.fromEntries(['info', 'warn', 'error'].map(level => [level, (event, details = {}) => {
+		const context = logContext.getStore()
+		baseLogger[level](event, context && details.requestId === context.requestId
+			? { ...details, clientAddress: context.clientAddress } : details)
+	}]))
+	const readPricing = createPricingReader({ fetchImpl: pricingFetchImpl })
+	const readQuotas = createQuotaReader(config, { fetchImpl: quotaFetchImpl })
+	const circuitBreaker = createCircuitBreaker(config, logger, readQuotas.peek)
 	const activeRequests = new WeakMap()
 	const server = http.createServer(async (request, response) => {
 		const requestId = randomUUID()
 		const startedAt = Date.now()
 		const requestContext = {
+			clientAddress: formatClientAddress(request.socket.remoteAddress, request.socket.remotePort),
 			requestId,
 			startedAt,
 			target: request.url,
@@ -638,6 +549,7 @@ export const createRouterServer = (
 			clientError: undefined,
 		}
 		activeRequests.set(request.socket, requestContext)
+		return logContext.run(requestContext, async () => {
 		response.once("finish", () => {
 			requestContext.completed = true
 		})
@@ -657,7 +569,20 @@ export const createRouterServer = (
 			return
 		}
 
-		if (!isAuthorized(request, config.apiKey)) {
+		// Public static shell only: no credentials or account data are embedded.
+  const asset = panelAssets.get(request.url === "/router" ? "/router/" : request.url)
+  if (asset && request.method === 'GET') {
+   response.writeHead(200, { ...panelHeaders, 'content-type': asset[1] })
+   response.end(readFileSync(new URL(`./web/${asset[0]}`, import.meta.url)))
+   return
+  }
+  if (request.url?.split('?')[0].startsWith('/router/')) {
+   Object.entries(panelHeaders).forEach(([key, value]) => response.setHeader(key, value))
+   if (!validPanelOrigin(request)) {
+    request.resume(); sendError(response, 403, 'invalid_origin', 'Origin no permitido', requestId); return
+   }
+  }
+		if (!request.url?.split("?")[0].startsWith("/router/") && !isAuthorized(request, config.apiKey)) {
 			request.resume()
 			sendError(response, 401, "invalid_api_key", "API key no válida", requestId)
 			return
@@ -680,6 +605,46 @@ export const createRouterServer = (
 			}
 			return
 		}
+
+  if (request.url?.split('?')[0] === '/router/accounts/rate-limits' && request.method === 'GET') {
+   const params = new URL(request.url, 'http://router.invalid').searchParams
+   if ([...params.keys()].some((key) => key !== 'refresh') || (params.has('refresh') && params.get('refresh') !== '1')) {
+    sendError(response, 400, 'invalid_query', 'Solo se permite refresh=1', requestId); return
+   }
+   const result = await readQuotas({ refresh: params.get('refresh') === '1' })
+   const circuits = circuitBreaker.snapshot()
+   sendJson(response, 200, { ...result, accounts: result.accounts.map((account, index) => ({ ...account, circuit: circuits[index] })) })
+   return
+  }
+  if (request.url?.split('?')[0] === '/router/pricing' && request.method === 'GET') {
+   if (new URL(request.url, 'http://router.invalid').search) {
+    sendError(response,400,'invalid_query','No se permiten parámetros',requestId); return
+   }
+   sendJson(response,200,await readPricing()); return
+  }
+  if (request.url?.split('?')[0] === '/router/usage/summary' && request.method === 'GET') {
+   let query
+   try { query = parseSummaryQuery(new URL(request.url, 'http://router.invalid').searchParams) }
+   catch { sendError(response,400,'invalid_query','Fechas YYYY-MM-DD inclusivas, máximo 31 días; account alias opcional',requestId); return }
+   try { if (!usageStore) throw Error(); sendJson(response,200,{ ...await usageStore.summary(query), storage:usageStore.health() }) }
+   catch { sendError(response,503,'usage_unavailable','Almacenamiento no disponible',requestId) }
+   return
+  }
+  if (request.url?.split('?')[0] === '/router/usage' && request.method === 'GET') {
+   let query
+   try { query = parseUsageQuery(new URL(request.url, 'http://router.invalid').searchParams) }
+   catch { sendError(response,400,'invalid_query','Rango UTC requerido (máximo 31 días), limit 1..500 y cursor entero',requestId); return }
+   try { if (!usageStore) throw Error(); sendJson(response,200,{ ...await usageStore.query(query), storage:usageStore.health() }) }
+   catch { sendError(response,503,'usage_unavailable','Almacenamiento no disponible',requestId) }
+   return
+  }
+  if (request.url === '/router/logs' && request.method === 'GET') {
+   if (!logHub) { sendError(response, 503, 'logs_unavailable', 'Visor no disponible', requestId); return }
+   logHub.connect(response, request.headers['last-event-id']); return
+  }
+  if (request.url?.split('?')[0].startsWith('/router/')) {
+   request.resume(); sendError(response, 404, 'router_route_not_found', 'Ruta no disponible', requestId); return
+  }
 
 		if (request.method === "CONNECT") {
 			request.resume()
@@ -706,6 +671,8 @@ export const createRouterServer = (
 			requestContext.target = target
 			const body = await readRequestBody(request, config.maxRequestBodyBytes)
 			const headers = buildRequestHeaders(request, body, requestId, config.apiKey)
+			// Same cached/in-flight source as the panel, independent of UI visits.
+			await readQuotas()
 			const attempts = []
 			const skipped = []
 				let attemptNumber = 0
@@ -737,6 +704,22 @@ export const createRouterServer = (
 				requestContext.upstreamResponded = false
 				requestContext.clientErrorCounted = false
 
+                const endpoint = target.split('?')[0]
+                const observed = request.method === 'POST' && ['/v1/responses','/v1/chat/completions'].includes(endpoint)
+                let upstreamStreamError
+                let observer, terminal = false, outcome = 'transport_error', usageHttpStatus = null
+                const finalizeUsage = () => {
+                 if (terminal || !observed) return
+                 terminal = true
+                 const record = { schemaVersion:1, timestamp:new Date().toISOString(), requestId,
+                  attempt:attemptNumber, index:upstreamIndex, alias:upstream.alias, endpoint, method:request.method,
+                  outcome, status:usageHttpStatus, durationMs:Date.now()-startedAt,
+                  ...(observer?.snapshot() ?? { inputTokens:null,outputTokens:null,totalTokens:null,cachedTokens:null,reasoningTokens:null,usageStatus:'unknown',provenance:'none',modelStatus:'unknown' }) }
+                 // Accounting is independent of console/SSE logging. Capture duration
+                 // once and persist before any logger callback can fail or filter it.
+                 try { usageStore?.write(record) } catch { logger.warn('usage_storage_error',{}) }
+                 logger.info('usage_attempt',record)
+                }
 				try {
 					const upstreamResponse = await requestUpstream({
 						upstream: upstream.url,
@@ -748,9 +731,11 @@ export const createRouterServer = (
 						signal: controller.signal,
 					})
 					requestContext.upstreamResponded = true
+                    upstreamResponse.once("error", error => { if (!controller.signal.aborted && error.code !== "ABORT_ERR") upstreamStreamError = error })
 
 					const statusCode = upstreamResponse.statusCode || 502
-					const retryable = isRetryableStatus(statusCode, config.retryStatusCodes)
+					usageHttpStatus = statusCode
+                    const retryable = isRetryableStatus(statusCode, config.retryStatusCodes)
 					const hasNext = index + 1 < config.upstreams.length
 					attempts.push({
 						attempt: attemptNumber,
@@ -778,7 +763,8 @@ export const createRouterServer = (
 							upstream: upstream.url.origin,
 							status: statusCode,
 						})
-						upstreamResponse.destroy()
+						outcome = "discarded"
+                        upstreamResponse.destroy()
 						continue
 					}
 
@@ -789,9 +775,14 @@ export const createRouterServer = (
 					outgoingHeaders["x-router-attempts"] = String(attemptNumber)
 					response.writeHead(statusCode, outgoingHeaders)
 
-					await pipeline(upstreamResponse, response)
+					if (observed) { try { observer = createUsageObserver(endpoint,upstreamResponse.headers) } catch { /* Observation must not break forwarding. */ } }
+                    if (observer) await pipeline(upstreamResponse,observer.stream,response)
+                    else await pipeline(upstreamResponse,response)
+                    outcome = statusCode >= 400 ? "http_error" : "complete"
 					if (!retryable) circuitBreaker.succeeded(index, requestId, reservation)
-					logger.info("request_complete", {
+					// Observed attempts have one merged terminal in finally, including
+					// method and usage. Keep legacy completion for other endpoints.
+					if (!observed) logger.info("request_complete", {
 						requestId,
 						method: request.method,
 						target,
@@ -803,11 +794,13 @@ export const createRouterServer = (
 					})
 					return
 				} catch (error) {
-					if (controller.signal.aborted) {
+                    outcome = controller.signal.aborted || response.headersSent ? "interrupted" : "transport_error"
+					if (controller.signal.aborted && !upstreamStreamError) {
 						if (
 							!requestContext.clientErrorCounted &&
 							!response.headersSent &&
-							!requestContext.upstreamResponded
+							!requestContext.upstreamResponded &&
+                            (requestContext.clientError || clientDisconnectReason) === "ECONNRESET"
 						) {
 							circuitBreaker.clientDisconnected(
 								index,
@@ -821,9 +814,9 @@ export const createRouterServer = (
 						}
 						return
 					}
-					const code = errorCode(error)
+					const code = errorCode(upstreamStreamError || error)
 					if (response.headersSent) {
-						if (!failureRecorded) {
+						if (!failureRecorded && !requestContext.clientErrorCounted) {
 							if (code === "ECONNRESET") {
 								circuitBreaker.clientDisconnected(
 									index,
@@ -840,7 +833,7 @@ export const createRouterServer = (
 								)
 							}
 						}
-						logger.error("response_stream_error", {
+						if (code !== "ECONNRESET") logger.error("response_stream_error", {
 							requestId,
 							attempt: attemptNumber,
 							index: upstreamIndex,
@@ -890,7 +883,7 @@ export const createRouterServer = (
 						})
 					}
 					if (!config.runtimeFailover || code === "ECONNRESET") break
-				}
+				} finally { finalizeUsage() }
 			}
 
 			if (attemptNumber === 0 && skipped.length > 0) {
@@ -931,18 +924,21 @@ export const createRouterServer = (
 			})
 			sendError(response, statusCode, code, error.message || "Error interno del router", requestId)
 		}
+		})
 	})
 
 	server.on("clientError", (error, socket) => {
 		const code = errorCode(error)
 		const context = activeRequests.get(socket)
 		const activeContext = context && !context.completed ? context : undefined
+		logContext.run(activeContext, () => {
 		let countedResult
 		let counted = false
 		if (activeContext) {
 			activeContext.clientError = code
 			if (
-				activeContext.currentReservation &&
+				code === "ECONNRESET" &&
+                activeContext.currentReservation &&
 				Number.isInteger(activeContext.currentUpstreamIndex) &&
 				!activeContext.clientErrorCounted
 			) {
@@ -984,6 +980,7 @@ export const createRouterServer = (
 			})
 		}
 		if (socket.writable) socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+		})
 	})
 
 	server.on("upgrade", (_request, socket) => {

@@ -1,3 +1,5 @@
+import { sanitizeLog } from './observability.mjs'
+
 const createTimestampFormatter = (timeZone) =>
 	new Intl.DateTimeFormat("en-CA", {
 		timeZone,
@@ -24,20 +26,22 @@ export const createLogger = ({
 	timeZone = "Etc/UTC",
 	output = (message) => console.log(message),
 	now = () => new Date(),
+ onRecord = () => {},
 } = {}) => {
 	const formatter = createTimestampFormatter(timeZone)
 
 	const writeLog = (level, event, details = {}) => {
+		const record = sanitizeLog(level, event, details)
+		const serializedDetails = Object.fromEntries(Object.keys(details).filter((key) => key in record && !['timestamp', 'level', 'event'].includes(key)).map((key) => [key, record[key]]))
+		onRecord(record.level, record.event, serializedDetails)
 		const timestamp = formatTimestamp(formatter, now())
-		const alias = details.alias
-		const progress = details.logProgress
-		const serializedDetails = { ...details }
-		delete serializedDetails.logProgress
+		const alias = serializedDetails.alias
+		const progress = typeof details.logProgress === 'string' && /^\d{1,3}\/\d{1,3}$/.test(details.logProgress) ? details.logProgress : ''
 		const aliasPrefix = alias ? ` [${alias}]` : ""
 		const progressPrefix = progress ? ` [${progress}]` : ""
 		const prefix = `[router-openai-oauth]${aliasPrefix}${progressPrefix}`
 		output(
-			`${prefix} ${level.toUpperCase()} ${timestamp} ${event} ${JSON.stringify(serializedDetails)}`,
+			`${prefix} ${record.level.toUpperCase()} ${timestamp} ${record.event} ${JSON.stringify(serializedDetails)}`,
 		)
 	}
 

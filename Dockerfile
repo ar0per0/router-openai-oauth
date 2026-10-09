@@ -1,6 +1,7 @@
-FROM node:22-bookworm-slim
+FROM node:22.23.3-bookworm-slim
 
 WORKDIR /app
+RUN mkdir -p -m 0700 /app/data && chown node:node /app/data
 
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
@@ -13,9 +14,6 @@ ENV HOST=0.0.0.0 \
     TZ=Etc/UTC \
     UPSTREAMS=http://127.0.0.1:10531 \
     UPSTREAM_TIMEOUT_MS=180000 \
-    STARTUP_HEALTHCHECK_TIMEOUT_MS=30000 \
-    STARTUP_HEALTHCHECK_ENABLED=true \
-    STARTUP_HEALTHCHECK_MODEL= \
     UPSTREAM_FAILURE_THRESHOLD=3 \
     CLIENT_ERROR_FAILURE_THRESHOLD=5 \
     RUNTIME_FAILOVER=false \
