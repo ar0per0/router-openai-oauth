@@ -22,7 +22,7 @@ Panel web para visualizar el estado/consumo de los upstream. Permite ver el cons
 ```text
 http://router-openai-oauth:10530/router/
 ```
-![Captura1](./captura1.png)
+![Captura1](./captura11.png)
 ![Captura2](./captura2.png)
 
 ---
@@ -84,11 +84,11 @@ El failover secuencial por petición puede recuperarse más adelante con
   mantienen el failover secuencial normal.
 
 Por ejemplo, con un umbral de `5`, deben fallar cinco peticiones diferentes
-contra `cuenta1`. La sexta petición empieza en `cuenta2`. Los logs muestran el
+contra `eduard`. La sexta petición empieza en `anna`. Los logs muestran el
 progreso en el prefijo:
 
 ```text
-[router-openai-oauth] [principal] [4/5] WARN 2026-10-03 14:26:25 upstream_client_error {...}
+[router-openai-oauth] [eduard] [4/5] WARN 2026-10-03 14:26:25 upstream_client_error {...}
 ```
 
 Cada petición comienza siempre por el primer upstream y avanza en orden solo
@@ -425,7 +425,7 @@ la palabra upstreams. Activos (`closed`) verdes, deshabilitados (`open`) rojos
  y recuperación (`half_open`) amarilla separada; estados ausentes desconocidos.
 El resumen refleja circuitos, no cuotas ni una comprobación de salud OAuth.
 Vencimiento no significa activo: hace falta una sonda exitosa.
-Cada encabezado lleva posición 1-based del array backend, sin reordenarlo: `(1) cuenta1`.
+Cada encabezado lleva posición 1-based del array backend, sin reordenarlo: `(1) eduard`.
 Título closed verde sin Activo/Activado separado; open rojo sin cuenta atrás
 de reanudación en el encabezado ni Deshabilitado repetido; half_open
 amarillo con etiqueta En recuperación y unknown sin color de salud. Sin
@@ -433,7 +433,7 @@ Cooldown ms ni Fallos; conserva errores cliente positivos y sonda en curso.
 `circuit.disabledUntil` es ISO: backend solo lo proporciona en `open`, null
 en `closed`/`half_open`. La API conserva esa fecha para consumidores; la UI ya no la muestra en el título.
 El error de cuenta se muestra solo si existe, nunca `Error: ninguno`.
-Solo primary → **Límite primario**, secondary → **Límite secundario**; no se
+Solo primary → **Límite 5h**, secondary → **Límite semanal**; no se
 presume duración 5h/semanal: el contrato OAuth no la garantiza. Disponible =
 `100 - usedPercent`: `Restante 69% · Se restablece en 2d 1h 5m`.
 Verde >25%, amarillo >0 y ≤25%, rojo 0%; null/inválidos/fuera de rango quedan
@@ -533,7 +533,7 @@ en la última sección de IMPLEMENTATION-RESULT.md.
 
 ### Resultado UI/scroll — 2026-10-06
 Panel Router centrado (max 72rem), logs fuera del wrapper a ancho disponible,
-encabezados `(1) cuenta1` y seguimiento de logs con pausa/reanudación por scroll.
+encabezados `(1) eduard` y seguimiento de logs con pausa/reanudación por scroll.
 Verificación dirigida **13/13** DOM/VM/CSS y sintaxis correcta. Sin navegador
 real, suite global, audit, Docker, deploy, live ni lectura de secretos.
 Evidencia y limitaciones en la sección final de IMPLEMENTATION-RESULT.md.

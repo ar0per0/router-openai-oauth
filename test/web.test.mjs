@@ -111,8 +111,8 @@ test("quota presentation: available windows and concise real circuit fields", as
 	for (const expected of ["<img onerror=alert(1)>", "<script>bad</script>", "(1) <img onerror=alert(1)>", "(2) empty", "En recuperación", "Errores cliente: 3", "Sonda en curso", "Restante 67%\n · Se restablece en 3h 26m", "Restante desconocido\n · Se restablece en desconocido"]) assert.ok(text.includes(expected), expected);
 	assert.doesNotMatch(text, /Límite general|Error: ninguno|Cooldown|Fallos|Deshabilitado hasta|false|Probe|unknown|Duración|Unix|1791300394|15:26:|\.123|ID:|Nombre:|Plan:|Créditos|saldo|por ID|tertiary|windows\.|normalModelSlug|1970|Consumido:/);
 	for (const card of h.nodes.accounts.children) {
-		assert.equal(card.children.filter((n) => n.textContent === "Límite primario").length, 1);
-		assert.equal(card.children.filter((n) => n.textContent === "Límite secundario").length, 1);
+		assert.equal(card.children.filter((n) => n.textContent === "Límite 5h").length, 1);
+		assert.equal(card.children.filter((n) => n.textContent === "Límite semanal").length, 1);
 	}
 	assert.equal(h.nodes["upstream-summary"].textContent, "1 activos\n · 1 deshabilitados\n · 1 en recuperación");
 	assert.deepEqual(h.nodes["upstream-summary"].children.map(n => n.className), ["health-green", "health-red", "health-yellow"]);
@@ -531,8 +531,8 @@ test("quota labels stay neutral for arbitrary, invalid and absent window duratio
   }}}]}));
   await h.nodes.refresh.fire();
   const card=h.nodes.accounts.children[0];
-  assert.equal(card.children.filter(n=>n.textContent==="Límite primario").length,1);
-  assert.equal(card.children.filter(n=>n.textContent==="Límite secundario").length,1);
+  assert.equal(card.children.filter(n=>n.textContent==="Límite 5h").length,1);
+  assert.equal(card.children.filter(n=>n.textContent==="Límite semanal").length,1);
   assert.doesNotMatch(card.textContent,/Límite 5h|setmanal|semanal|<script>|private/);
   assert.match(card.textContent,/Restante 67%/);
   assert.match(card.textContent,/Se restablece en 3h 26m/);

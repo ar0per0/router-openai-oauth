@@ -72,8 +72,8 @@
 		countdown(row, "Se restablece en", object(w) ? w.resetsAt : null, "seconds", now);
 	};
 	const snapshot = (parent, s, now) => {
-		windowView(parent, "Límite primario", object(s) ? s.primary : null, now);
-		windowView(parent, "Límite secundario", object(s) ? s.secondary : null, now);
+		windowView(parent, "Límite 5h", object(s) ? s.primary : null, now);
+		windowView(parent, "Límite semanal", object(s) ? s.secondary : null, now);
 	};
 	const circuitState = (c) => ["closed", "open", "half_open"].includes(c.state) ? c.state : null;
 	const circuitView = (parent, heading, c, now) => {

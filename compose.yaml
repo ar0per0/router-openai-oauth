@@ -1,45 +1,21 @@
-# Define los servicios que ejecutará Docker Compose.
 services:
-  # Servicio intermediario compatible con la API de OpenAI.
   router-openai-oauth:
-    # Construye la imagen usando el Dockerfile de esta carpeta.
-    build: .
-    # Nombre y etiqueta de la imagen generada.
     image: ar0per0/router-openai-oauth:latest
-    # Activa un proceso init para gestionar correctamente las señales y procesos hijos.
     init: true
-    # Reinicia el contenedor automáticamente salvo que se detenga manualmente.
     restart: unless-stopped
-    # Variables de configuración del router.
     environment:
-      # Zona horaria usada en las marcas de fecha y hora de los logs.
       TZ: Europe/Madrid
-      # Upstreams en orden de prioridad; separa varias URLs con "|".
-      UPSTREAMS: "principal=http://192.168.1.15:10531"
-      # Tiempo máximo de espera por inactividad de cada upstream, en milisegundos.
-      UPSTREAM_TIMEOUT_MS: 180000
-      # Errores consecutivos runtime antes de desactivar un upstream.
-      UPSTREAM_FAILURE_THRESHOLD: 3
-      # ECONNRESET consecutivos antes de desactivar el upstream afectado.
-      CLIENT_ERROR_FAILURE_THRESHOLD: 5
-      # Durante el diagnóstico, devuelve el error observado sin probar el siguiente upstream.
-      RUNTIME_FAILOVER: false
-      # Cuota agotada: espera al reset real; fallos sin cuota usan fallback interno.
-      # Tamaño máximo permitido del cuerpo de una petición, en bytes.
-      MAX_REQUEST_BODY_BYTES: 33554432
-      # Estados HTTP contabilizados como fallo; activan el siguiente solo si RUNTIME_FAILOVER=true.
-      RETRY_STATUS_CODES: "401,403,408,429,500-599"
-      # Clave Bearer opcional para proteger el acceso al router; vacía significa sin autenticación.
-      ROUTER_API_KEY: ${ROUTER_API_KEY:-}
-      # Lectura de cuotas compartida por routing y panel; timeout por instancia.
-      QUOTA_TIMEOUT_MS: 10000
-      # Caché/deduplicación bajo demanda; sin monitor ni polling.
-      QUOTA_CACHE_MS: 15000
-    volumes:
-      - router-usage:/app/data
-    # Publica el puerto 10530 del contenedor en el puerto 10530 del host.
+      UPSTREAMS: "principal=http://192.168.1.15:10531" # Upstreams en orden de prioridad; separa varias URLs con "|".
+      UPSTREAM_TIMEOUT_MS: 180000 # Tiempo máximo de espera por inactividad de cada upstream, en milisegundos.
+      UPSTREAM_FAILURE_THRESHOLD: 3 # Número de errores consecutivos antes de desactivar temporalmente un upstream.
+      CLIENT_ERROR_FAILURE_THRESHOLD: 5 # Durante el diagnóstico, devuelve el error observado sin probar el siguiente upstream.
+      MAX_REQUEST_BODY_BYTES: 33554432 # Tamaño máximo permitido del cuerpo de una petición, en bytes.
+      RETRY_STATUS_CODES: "401,403,408,429,500-599" # Estados HTTP que hacen que el router pruebe el siguiente upstream.
+      ROUTER_API_KEY: "" # Clave Bearer opcional para proteger el acceso al router; vacía significa sin autenticación.
+      RUNTIME_FAILOVER: true # Durante el diagnóstico, devuelve el error observado sin probar el siguiente upstream.
+      QUOTA_TIMEOUT_MS: 10000 # Lectura de cuotas compartida por routing y panel; timeout por instancia.
+      QUOTA_CACHE_MS: 15000 # Caché/deduplicación bajo demanda; sin monitor ni polling.
     ports:
       - "10530:10530"
-
-volumes:
-  router-usage:
+    volumes:
+      - router-openai-oauth:/app/data
