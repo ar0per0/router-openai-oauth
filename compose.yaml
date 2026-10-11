@@ -19,3 +19,4 @@ services:
       - "10530:10530"
     volumes:
       - router-openai-oauth:/app/data
+

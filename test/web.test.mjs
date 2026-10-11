@@ -523,7 +523,7 @@ test('usage scalar viewer allowlist, unknown null, invalid numbers and private f
 })
 
 
-test("quota labels stay neutral for arbitrary, invalid and absent window durations", async () => {
+test("quota labels retain requested 5h and weekly labels for arbitrary, invalid and absent durations", async () => {
  for (const windowDurationMins of [17, 300, 10080, null, undefined, 0, -1, "300", Infinity, NaN, "<script>private</script>"]) {
   const h = harness(() => jsonResponse({accounts:[{rateLimits:{rateLimits:{
    primary:{usedPercent:33,resetsAt:1791300394,windowDurationMins},
@@ -533,7 +533,7 @@ test("quota labels stay neutral for arbitrary, invalid and absent window duratio
   const card=h.nodes.accounts.children[0];
   assert.equal(card.children.filter(n=>n.textContent==="Límite 5h").length,1);
   assert.equal(card.children.filter(n=>n.textContent==="Límite semanal").length,1);
-  assert.doesNotMatch(card.textContent,/Límite 5h|setmanal|semanal|<script>|private/);
+  assert.doesNotMatch(card.textContent,/setmanal|<script>|private/);
   assert.match(card.textContent,/Restante 67%/);
   assert.match(card.textContent,/Se restablece en 3h 26m/);
  }

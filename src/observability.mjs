@@ -94,7 +94,11 @@ export const sanitizeLog = (level, event, details = {}, timestamp = new Date().t
  if (['/v1/responses','/v1/chat/completions'].includes(details.endpoint)) safe.endpoint = details.endpoint
  return safe
 }
-export const createLogHub = ({ maxEntries = 200, maxSubscribers = 16, maxFrameBytes = 2048 } = {}) => {
+export const createLogHub = ({
+ maxEntries = 200, maxSubscribers = 16, maxFrameBytes = 2048,
+ maxQueueFrames = 256, maxQueueBytes = 1024 * 1024,
+ drainTimeoutMs = 30000, heartbeatMs = 15000,
+} = {}) => {
  const entries = [], subscribers = new Set()
  const epoch = randomUUID(); let sequence = 0n
  const publish = (level, event, details) => {
@@ -102,21 +106,68 @@ export const createLogHub = ({ maxEntries = 200, maxSubscribers = 16, maxFrameBy
   if (Buffer.byteLength(dataFrame) > maxFrameBytes) return
   const frame = `id: ${epoch}:${++sequence}\n${dataFrame}`
   entries.push(frame); if (entries.length > maxEntries) entries.shift()
-  for (const response of subscribers) if (response.destroyed || !response.write(frame)) { subscribers.delete(response); response.destroy() }
+  for (const subscriber of subscribers) subscriber.enqueue(frame)
  }
  const connect = (response, lastEventId) => {
   if (subscribers.size >= maxSubscribers) { response.writeHead(503); response.end(); return }
-  response.writeHead(200, { 'content-type':'text/event-stream; charset=utf-8','cache-control':'no-store','x-accel-buffering':'no','connection':'keep-alive' })
-  response.flushHeaders?.()
-  const cleanup = () => { subscribers.delete(response); clearInterval(heartbeat); response.off('close', cleanup); response.off('error', cleanup) }
-  const write = (frame) => { if (!response.write(frame)) { cleanup(); response.destroy(); return false } return true }
-  const heartbeat = setInterval(() => write(': keepalive\n\n'), 15000); heartbeat.unref()
-  response.on('close', cleanup); response.on('error', cleanup)
-  subscribers.add(response)
-  // Only skip through an exact retained cursor; unknown/evicted epochs replay the ring.
-  const cursor = typeof lastEventId === 'string' && lastEventId.length <= 128 ? entries.findIndex(frame => frame.startsWith(`id: ${lastEventId}\n`)) : -1
-  for (const frame of entries.slice(cursor + 1)) if (!write(frame)) break
+  let closed = false, paused = false, pumping = false, queuedBytes = 0, heartbeat, drainTimer
+  const queue = []
+  const cleanup = () => {
+   if (closed) return
+   closed = true
+   subscribers.delete(subscriber)
+   clearInterval(heartbeat); clearTimeout(drainTimer)
+   response.off('drain', onDrain); response.off('close', cleanup); response.off('error', disconnect)
+   queue.length = 0; queuedBytes = 0
+  }
+  const disconnect = () => {
+   cleanup()
+   // A viewer's faulty transport must never throw through publish/logger.
+   try { response.destroy() } catch {}
+  }
+  const pump = () => {
+   if (closed || paused || pumping) return
+   pumping = true
+   try {
+    while (queue.length && !closed && !paused) {
+     if (response.destroyed || response.writableEnded) { disconnect(); break }
+     const frame = queue.shift(); queuedBytes -= Buffer.byteLength(frame)
+     // false means accepted: remove once, and never replay it on drain.
+     if (!response.write(frame) && !closed) {
+      paused = true
+      response.once('drain', onDrain)
+      drainTimer = setTimeout(disconnect, drainTimeoutMs); drainTimer.unref?.()
+     }
+    }
+   } catch { disconnect() }
+   finally { pumping = false }
+  }
+  const onDrain = () => {
+   if (closed) return
+   clearTimeout(drainTimer); drainTimer = undefined; paused = false
+   pump()
+  }
+  const subscriber = {
+   enqueue(frame) {
+    if (closed) return
+    const bytes = Buffer.byteLength(frame)
+    if (queue.length >= maxQueueFrames || queuedBytes + bytes > maxQueueBytes) { disconnect(); return }
+    queue.push(frame); queuedBytes += bytes; pump()
+   },
+   disconnect,
+  }
+  response.on('close', cleanup); response.on('error', disconnect)
+  subscribers.add(subscriber)
+  try {
+   response.writeHead(200, { 'content-type':'text/event-stream; charset=utf-8','cache-control':'no-store','x-accel-buffering':'no','connection':'keep-alive' })
+   response.flushHeaders?.()
+   if (closed) return
+   heartbeat = setInterval(() => subscriber.enqueue(': keepalive\n\n'), heartbeatMs); heartbeat.unref?.()
+   // Only skip through an exact retained cursor; unknown/evicted epochs replay the ring.
+   const cursor = typeof lastEventId === 'string' && lastEventId.length <= 128 ? entries.findIndex(frame => frame.startsWith(`id: ${lastEventId}\n`)) : -1
+   for (const frame of entries.slice(cursor + 1)) subscriber.enqueue(frame)
+  } catch { disconnect() }
  }
- const close = () => { for (const response of subscribers) response.destroy(); subscribers.clear() }
+ const close = () => { for (const subscriber of subscribers) subscriber.disconnect() }
  return { publish, connect, close, get size() { return entries.length }, get subscriberCount() { return subscribers.size } }
 }
