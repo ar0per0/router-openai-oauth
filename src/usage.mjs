@@ -1,5 +1,6 @@
 import { Transform } from 'node:stream'
 const integer = v => Number.isSafeInteger(v) && v >= 0 ? v : null
+const observationError = code => Object.assign(new Error('Usage observation failed'), { observationCode: code })
 export const metrics = ['inputTokens','outputTokens','totalTokens','cachedTokens','reasoningTokens']
 export const normalizeUsage = (u = {}, chat = false) => ({
  inputTokens: integer(u[chat ? 'prompt_tokens' : 'input_tokens']),
@@ -16,7 +17,7 @@ class SelectJSON {
  selected(path) { return /^(type|status|response\.status|usage\.(prompt_tokens|completion_tokens|input_tokens|output_tokens|total_tokens|prompt_tokens_details.cached_tokens|completion_tokens_details.reasoning_tokens|input_tokens_details.cached_tokens|output_tokens_details.reasoning_tokens)|response\.usage\.(input_tokens|output_tokens|total_tokens|input_tokens_details.cached_tokens|output_tokens_details.reasoning_tokens))$/.test(path.join('.')) }
  value(v) { const path = this.path(); if (this.selected(path)) this.values[path.join('.')] = v; this.accept() }
  accept() { const p = this.stack.at(-1); if (!p) { if (this.done) throw Error(); this.done = true } else { if (!['value','first'].includes(p.state)) throw Error(); p.state = 'comma' } }
- start(c) { const p = this.stack.at(-1); if (p && !['value','first'].includes(p.state)) throw Error(); if (!p && (this.done || this.rootStarted)) throw Error(); if (!p) this.rootStarted = true; const path = this.path(); if (this.stack.length >= 64) throw Error(); this.stack.push({ kind:c, path, state:c === '{' ? 'keyFirst' : 'first', key:'' }) }
+  start(c) { const p = this.stack.at(-1); if (p && !['value','first'].includes(p.state)) throw Error(); if (!p && (this.done || this.rootStarted)) throw Error(); if (!p) this.rootStarted = true; const path = this.path(); if (this.stack.length >= 64) throw observationError('json_depth_limit'); this.stack.push({ kind:c, path, state:c === '{' ? 'keyFirst' : 'first', key:'' }) }
  punctuation(c) { const p = this.stack.at(-1); if (c === '{' || c === '[') return this.start(c); if (!p) throw Error(); if (c === ':' && p.kind === '{' && p.state === 'colon') { p.state = 'value'; return }
  if (c === ',' && p.state === 'comma') { p.state = p.kind === '{' ? 'key' : 'value'; return }
  if ((c === '}' && p.kind === '{' && ['comma','keyFirst'].includes(p.state)) || (c === ']' && p.kind === '[' && ['comma','first'].includes(p.state))) { if (p.path.join('.') === 'choices') this.values.emptyChoices = p.state === 'first'; this.stack.pop(); this.accept(); return } throw Error() }
@@ -26,7 +27,13 @@ class SelectJSON {
    if (this.escape) { if (!/["\\/bfnrtu]/.test(c)) throw Error(); this.escape = false; if (c === 'u') this.unicode = 4; if (this.keep) this.token += c; continue }
    if (c === '\\') { this.escape = true; if (this.keep) this.token += c; continue }
    if (c === '"') { const value = this.keep ? JSON.parse('"'+this.token+'"') : null; this.mode = ''; const p = this.stack.at(-1); if (p && ['key','keyFirst'].includes(p.state)) { p.key = value; p.state = 'colon' } else this.value(value); continue }
-   if (c.charCodeAt(0) < 32) throw Error(); if (this.keep) { this.token += c; if (this.token.length > 256) throw Error() } continue
+    if (c.charCodeAt(0) < 32) throw Error(); if (this.keep) { this.token += c; if (this.token.length > 256) {
+     const p = this.stack.at(-1)
+     // Arbitrary tool/schema property names are not usage fields. Discard long
+     // keys without retaining their content or disabling the entire observer.
+     if (p && ['key','keyFirst'].includes(p.state)) { this.keep = false; this.token = '' }
+     else throw observationError('selected_value_limit')
+    } } continue
   }
   if (this.mode === 'literal') { if (/[a-zA-Z0-9+.\-]/.test(c)) { this.token += c; if (this.token.length > 128) throw Error(); continue } this.value(JSON.parse(this.token)); this.mode = '' }
   if (/\s/.test(c)) continue
@@ -52,17 +59,22 @@ export const createUsageObserver = (endpoint, headers = {}, { maxBytes = 1677721
   result.modelStatus = modelStatus
   const m = normalizeUsage(u, chat); if (!metrics.some(k => m[k] !== null)) return
   // Repeated identical cumulative terminal chunks are measurements, not deltas.
-  if (seen && JSON.stringify(candidate) !== JSON.stringify(m)) throw Error()
+   if (seen && JSON.stringify(candidate) !== JSON.stringify(m)) throw observationError('conflicting_usage')
   seen = true; candidate = m; result = { ...m, modelStatus, usageStatus:'upstream_reported', provenance:chat ? 'chat_adapter_reported_zero_ambiguous' : 'responses_upstream_reported' }
  }
  const feedData = c => {
-  if (doneEvent) { if (!/\s/.test(c)) throw Error(); return }
+   if (doneEvent) { if (!/\s/.test(c)) throw observationError('invalid_done_event'); return }
+  if (eventPrefix === '' && /\s/.test(c)) return
   if (eventPrefix !== null) { eventPrefix += c; if ('[DONE]'.startsWith(eventPrefix)) { if (eventPrefix === '[DONE]') doneEvent = true; return } parser.feed(eventPrefix); eventPrefix = null; return }
   parser.feed(c)
  }
+ const endEvent = () => {
+  if (!doneEvent && eventPrefix !== '') accept(parser.finish())
+  parser = new SelectJSON(); eventData = false; eventPrefix = ''; doneEvent = false
+ }
  const endLine = () => {
   if (dataLine) { feedData('\n'); eventData = true }
-  else if (prefix === '' && eventData) { if (!doneEvent) accept(parser.finish()); parser = new SelectJSON(); eventData = false; eventPrefix = ''; doneEvent = false }
+  else if (prefix === '' && eventData) endEvent()
   prefix = ''; dataLine = false
  }
  const consume = text => {
@@ -75,8 +87,21 @@ export const createUsageObserver = (endpoint, headers = {}, { maxBytes = 1677721
    else { if (prefix.length < 6) prefix += c; if (prefix === 'data:') { dataLine = true; prefix = 'space' } }
   }
  }
- const fail = () => { disabled = true; result = { ...normalizeUsage(), usageStatus:'unknown', provenance:'observation_unavailable', modelStatus:'unknown' } }
- const stream = new Transform({ transform(chunk, encoding, callback) { if (!disabled) try { bytes += chunk.length; if (bytes > maxBytes) throw Error(); consume(decoder.decode(chunk, { stream:true })) } catch { fail() } callback(null, chunk) }, flush(callback) { if (!disabled) try { consume(decoder.decode()); if (!sse) accept(parser.finish()); else if (eventData || dataLine) throw Error() } catch { fail() } callback() } })
+  const fail = reason => { disabled = true; result = { ...normalizeUsage(), usageStatus:'unknown', provenance:'observation_unavailable', modelStatus:'unknown', observationError:reason } }
+  const decode = (chunk, options) => { try { return decoder.decode(chunk, options) } catch { throw observationError('invalid_utf8') } }
+  const failureReason = error => error?.observationCode || (sse ? 'invalid_sse_json' : 'invalid_json')
+  const stream = new Transform({ transform(chunk, encoding, callback) { if (!disabled) try { bytes += chunk.length; if (bytes > maxBytes) throw observationError('response_size_limit'); consume(decode(chunk, { stream:true })) } catch (error) { fail(failureReason(error)) } callback(null, chunk) }, flush(callback) {
+  if (!disabled) try {
+    consume(decode())
+   if (!sse) accept(parser.finish())
+   else {
+    // Tolerate a missing final separator only after validating the complete event.
+    if (dataLine) endLine()
+    if (eventData) endEvent()
+   }
+   } catch (error) { fail(failureReason(error)) }
+  callback()
+ } })
  // [DONE] is handled by the fixed-size prefix check, not JSON parsing.
  return { stream, snapshot: () => ({ ...result }) }
 }

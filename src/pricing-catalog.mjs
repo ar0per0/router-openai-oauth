@@ -1,5 +1,5 @@
 // Public metadata only; never forward inbound headers, filters or usage to providers.
-export const CATALOG_URL = 'https://api.litellm.ai/model_catalog'
+export const CATALOG_URL = 'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json'
 export const FX_URL = 'https://api.frankfurter.dev/v2/providers/ecb/rate/USD/EUR'
 const finite = v => typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null
 const text = (v, max) => typeof v === 'string' && v.length > 0 && v.length <= max && !/[\u0000-\u001f\u007f]/.test(v)
@@ -9,9 +9,13 @@ export const normalizeModel = m => {
  if (rates.input === null && rates.output === null) return null
  return { id:m.id, provider:m.provider, mode:m.mode, rates }
 }
-async function json(fetchImpl, url, signal, maxBytes) {
+async function json(fetchImpl, url, signal, maxBytes, allowText = false) {
  const r = await fetchImpl(url, { signal, redirect:'error', credentials:'omit', headers:{accept:'application/json'} })
- if (!r.ok || !/^application\/json\b/i.test(r.headers.get('content-type') ?? '') || Number(r.headers.get('content-length')) > maxBytes) throw Error('PUBLIC_METADATA_UNAVAILABLE')
+ const contentType = r.headers.get('content-type') ?? ''
+ if (!r.ok || !(/^application\/json\b/i.test(contentType) || (allowText && /^text\/plain\b/i.test(contentType))) || Number(r.headers.get('content-length')) > maxBytes) {
+  await r.body?.cancel().catch(()=>{})
+  throw Error('PUBLIC_METADATA_UNAVAILABLE')
+ }
  const reader=r.body.getReader(); let bytes=0; const chunks=[]
  try {
   while (true) { const {done,value}=await reader.read(); if(done) break; bytes+=value.byteLength; if(bytes>maxBytes) throw Error('METADATA_LIMIT'); chunks.push(value) }
@@ -19,8 +23,8 @@ async function json(fetchImpl, url, signal, maxBytes) {
  return JSON.parse(Buffer.concat(chunks).toString('utf8'))
 }
 // Independent success TTLs; failed loads have a cooldown and never reuse expired FX.
-// Each refresh is single-flight, bounded as a whole, and all-or-nothing for pagination.
-export const createPricingReader = ({fetchImpl=fetch, now=Date.now, catalogTTL=86400000, fxTTL=21600000, failureTTL=60000, timeoutMs=20000, maxPages=30, maxPageBytes=2097152}={}) => {
+// Each refresh is single-flight and bounded as a whole.
+export const createPricingReader = ({fetchImpl=fetch, now=Date.now, catalogTTL=86400000, fxTTL=21600000, failureTTL=60000, timeoutMs=20000, maxCatalogBytes=8388608}={}) => {
  const cached = (load, ttl) => {
   let value=null, expires=0, pending=null
   return () => {
@@ -37,16 +41,17 @@ export const createPricingReader = ({fetchImpl=fetch, now=Date.now, catalogTTL=8
   }
  }
  const catalog=cached(async signal=>{
-  const models=new Map(); let count=0
-  for(let page=1;page<=maxPages;page++) {
-   const d=await json(fetchImpl,`${CATALOG_URL}?page=${page}&page_size=500`,signal,maxPageBytes)
-   if(!Array.isArray(d.data)||d.data.length>500||typeof d.has_more!=='boolean'||d.page!==page||d.page_size!==500||!Number.isSafeInteger(d.total_count)||d.total_count<0) throw Error('INVALID_CATALOG')
-   count+=d.data.length
-   for(const raw of d.data) {const m=normalizeModel(raw);if(m) {const key=JSON.stringify([m.provider,m.id]);const previous=models.get(key);if(previous && JSON.stringify(previous)!==JSON.stringify(m)) throw Error('CONFLICTING_MODEL');models.set(key,m)}}
-   if(!d.has_more) { if(count!==d.total_count||!models.size) throw Error('INCOMPLETE_CATALOG');return {models:[...models.values()].sort((a,b)=>a.provider.localeCompare(b.provider)||a.id.localeCompare(b.id)), fetchedAt:new Date(now()).toISOString(), source:CATALOG_URL,currency:'USD'} }
-   if(!d.data.length) throw Error('EMPTY_PAGE')
+  const d=await json(fetchImpl,CATALOG_URL,signal,maxCatalogBytes,true)
+  if(!d||typeof d!=='object'||Array.isArray(d)) throw Error('INVALID_CATALOG')
+  const models=[]
+  for(const [id,raw] of Object.entries(d)) {
+   if(id==='sample_spec'||!raw||typeof raw!=='object'||Array.isArray(raw)) continue
+   const m=normalizeModel({...raw,id,provider:raw.litellm_provider})
+   if(m) models.push(m)
+   if(models.length>15000) throw Error('MODEL_LIMIT')
   }
-  throw Error('PAGE_LIMIT')
+  if(!models.length) throw Error('EMPTY_CATALOG')
+  return {models:models.sort((a,b)=>a.provider.localeCompare(b.provider)||a.id.localeCompare(b.id)), fetchedAt:new Date(now()).toISOString(), source:CATALOG_URL,currency:'USD'}
  },catalogTTL)
  const fx=cached(async signal=>{
   const d=await json(fetchImpl,FX_URL,signal,16384)

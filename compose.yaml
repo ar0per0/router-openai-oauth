@@ -6,7 +6,7 @@ services:
     environment:
       TZ: Europe/Madrid
       UPSTREAMS: "principal=http://192.168.1.15:10531" # Upstreams en orden de prioridad; separa varias URLs con "|".
-      UPSTREAM_TIMEOUT_MS: 180000 # Tiempo máximo de espera por inactividad de cada upstream, en milisegundos.
+      UPSTREAM_TIMEOUT_MS: ${UPSTREAM_TIMEOUT_MS:-240000} # Configurable en .env; debe superar el deadline OAuth.
       UPSTREAM_FAILURE_THRESHOLD: 3 # Número de errores consecutivos antes de desactivar temporalmente un upstream.
       CLIENT_ERROR_FAILURE_THRESHOLD: 5 # Durante el diagnóstico, devuelve el error observado sin probar el siguiente upstream.
       MAX_REQUEST_BODY_BYTES: 33554432 # Tamaño máximo permitido del cuerpo de una petición, en bytes.
@@ -20,3 +20,5 @@ services:
     volumes:
       - router-openai-oauth:/app/data
 
+volumes:
+  router-openai-oauth:

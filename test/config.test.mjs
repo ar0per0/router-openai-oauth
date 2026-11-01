@@ -19,8 +19,9 @@ test("Docker sin USAGE_DB_PATH conserva el archivo del volumen durable", (t) => 
 	assert.equal(workdir, "/app")
 	assert.doesNotMatch(dockerfile, /USAGE_DB_PATH/)
 	assert.doesNotMatch(compose, /USAGE_DB_PATH/)
-	assert.match(compose, /- router-usage:\/app\/data\s/)
-	assert.match(compose, /^volumes:\s*\n  router-usage:/m)
+	// Preserve the deployed volume name; renaming it can hide existing usage data.
+	assert.match(compose, /- router-openai-oauth:\/app\/data\s/)
+	assert.match(compose, /^volumes:\s*\n  router-openai-oauth:/m)
 	t.mock.method(process, "cwd", () => workdir)
 	assert.equal(loadConfig({}).usageDbPath, "/app/data/usage.sqlite")
 })

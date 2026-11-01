@@ -90,7 +90,8 @@ export const sanitizeLog = (level, event, details = {}, timestamp = new Date().t
   if (typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(value) && !/bearer|token|secret|password|sk-/i.test(value)) safe[key] = value
  }
  for (const key of ['inputTokens','outputTokens','totalTokens','cachedTokens','reasoningTokens']) if (details[key] === null || Number.isSafeInteger(details[key]) && details[key] >= 0) safe[key] = details[key]
- for (const key of ['outcome','usageStatus','provenance','modelStatus']) if (typeof details[key] === 'string' && /^[a-z_]{1,80}$/.test(details[key])) safe[key] = details[key]
+  for (const key of ['outcome','usageStatus','provenance','modelStatus']) if (typeof details[key] === 'string' && /^[a-z_]{1,80}$/.test(details[key])) safe[key] = details[key]
+  if (['json_depth_limit','selected_value_limit','conflicting_usage','invalid_done_event','invalid_utf8','response_size_limit','invalid_sse_json','invalid_json'].includes(details.observationError)) safe.observationError = details.observationError
  if (['/v1/responses','/v1/chat/completions'].includes(details.endpoint)) safe.endpoint = details.endpoint
  return safe
 }

@@ -355,11 +355,11 @@ test('wire usage → observer → SQLite worker → HTTP summary/catalog → poi
   observer.stream.resume();observer.stream.end(JSON.stringify({status:'completed',usage}));await once(observer.stream,'end');return observer.snapshot();
  };
  // Public tariff fixture uses the exact verified catalog field names/units.
- const raw={id:'chat-latest',provider:'openai',mode:'chat',input_cost_per_token:.000005,output_cost_per_token:.00003,cache_read_input_token_cost:5e-7};
+ const raw={litellm_provider:'openai',mode:'chat',input_cost_per_token:.000005,output_cost_per_token:.00003,cache_read_input_token_cost:5e-7};
  let publicCalls=0;
  const server=createRouterServer(loadConfig({UPSTREAMS:'fixture=http://127.0.0.1:1',ROUTER_API_KEY:'synthetic'}),{
   usageStore:store,quotaFetchImpl:()=>{throw Error('NO_QUOTA_OR_INFERENCE')},
-  pricingFetchImpl:async url=>{publicCalls++;return url===FX_URL?Response.json({base:'USD',quote:'EUR',date:now,rate:.89397}):Response.json({data:[raw,{...raw,provider:'other',input_cost_per_token:0,output_cost_per_token:0,cache_read_input_token_cost:0}],page:1,page_size:500,has_more:false,total_count:2});},
+  pricingFetchImpl:async url=>{publicCalls++;return url===FX_URL?Response.json({base:'USD',quote:'EUR',date:now,rate:.89397}):new Response(JSON.stringify({'chat-latest':raw,'other/chat-latest':{...raw,litellm_provider:'other',input_cost_per_token:0,output_cost_per_token:0,cache_read_input_token_cost:0}}),{headers:{'content-type':'text/plain; charset=utf-8'}});},
  });
  server.listen(0,'127.0.0.1');await once(server,'listening');const base=`http://127.0.0.1:${server.address().port}`;
  const push=async(attempt,endpoint,usage)=>assert.equal(store.write({timestamp:'2026-10-08T12:00:00.000Z',requestId:'00000000-0000-0000-0000-000000000001',attempt,index:1,alias:'fixture',endpoint,outcome:'complete',...await observe(endpoint,usage)}),true);
@@ -403,7 +403,7 @@ test('wire usage → observer → SQLite worker → HTTP summary/catalog → poi
   input.fire('click');list.children[0].fire('click');assert.doesNotMatch(n['usage-total'].textContent,/≈/);
   input.value='openai';input.fire('input');input.fire('keydown',{key:'ArrowDown'});input.fire('keydown',{key:'ArrowDown'});input.fire('keydown',{key:'Enter'});assertPrices('€');
   input.value='other';input.fire('input');list.children[1].fire('click');
-  assert.equal(h.stored.get('router.pricing.model'),JSON.stringify(['other','chat-latest']),'same model ID belongs to a different provider');
+  assert.equal(h.stored.get('router.pricing.model'),JSON.stringify(['other','other/chat-latest']),'provider-qualified catalog ID is preserved');
   assert.match(n['usage-total'].textContent,/≈ 0 €/);
   input.value='openai';input.fire('input');input.fire('keydown',{key:'ArrowDown'});input.fire('keydown',{key:'ArrowDown'});input.fire('keydown',{key:'Enter'});assertPrices('€');
   for(const key of ['inputTokens','outputTokens','cachedTokens','reasoningTokens','totalTokens']){
@@ -429,13 +429,13 @@ test('wire usage → observer → SQLite worker → HTTP summary/catalog → poi
 
 test('REAL partial aggregate → SQLite worker → HTTP → mouse/keyboard UI with numeric component prices',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'real-partial-ui-')),store=createUsageStore(join(dir,'usage.sqlite'));
- // Tariffs observed by public GET on catalog page 3; fixture only, never runtime defaults.
- const raw={id:'ft:gpt-4o-2024-08-06',provider:'openai',mode:'chat',input_cost_per_token:.00000375,output_cost_per_token:.000015,cache_read_input_token_cost:.000001875};
+ // Public tariff fixture; never runtime defaults.
+ const raw={litellm_provider:'openai',mode:'chat',input_cost_per_token:.00000375,output_cost_per_token:.000015,cache_read_input_token_cost:.000001875};
  const sums={inputTokens:2880607,outputTokens:17767,totalTokens:2898374,cachedTokens:575232,reasoningTokens:1397};
  const record=(attempt,fields)=>({timestamp:'2026-10-08T12:00:00.000Z',requestId:'00000000-0000-0000-0000-000000000002',attempt,index:1,alias:'fixture',endpoint:'/v1/responses',outcome:'complete',usageStatus:attempt===1?'upstream_reported':'unknown',provenance:attempt===1?'responses_upstream_reported':'none',modelStatus:'completed',...fields});
  const server=createRouterServer(loadConfig({UPSTREAMS:'fixture=http://127.0.0.1:1',ROUTER_API_KEY:'synthetic'}),{
   usageStore:store,quotaFetchImpl:()=>{throw Error('NO_INFERENCE_OR_QUOTA')},
-  pricingFetchImpl:async url=>Response.json(url===FX_URL?{base:'USD',quote:'EUR',date:new Date().toISOString().slice(0,10),rate:.89397}:{data:[raw],page:1,page_size:500,has_more:false,total_count:1}),
+  pricingFetchImpl:async url=>Response.json(url===FX_URL?{base:'USD',quote:'EUR',date:new Date().toISOString().slice(0,10),rate:.89397}:{'ft:gpt-4o-2024-08-06':raw}),
  });
  server.listen(0,'127.0.0.1');await once(server,'listening');const base=`http://127.0.0.1:${server.address().port}`,path='/router/usage/summary?from=2026-10-08&to=2026-10-08';
  try {

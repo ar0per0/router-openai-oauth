@@ -39,7 +39,7 @@ services:
     environment:
       TZ: Europe/Madrid
       UPSTREAMS: "principal=http://192.168.1.15:10531" # Upstreams en orden de prioridad; separa varias URLs con "|".
-      UPSTREAM_TIMEOUT_MS: 180000 # Tiempo máximo de espera por inactividad de cada upstream, en milisegundos.
+      UPSTREAM_TIMEOUT_MS: ${UPSTREAM_TIMEOUT_MS:-240000} # Configurable en .env; mayor que el deadline OAuth.
       UPSTREAM_FAILURE_THRESHOLD: 3 # Número de errores consecutivos antes de desactivar temporalmente un upstream.
       CLIENT_ERROR_FAILURE_THRESHOLD: 5 # Durante el diagnóstico, devuelve el error observado sin probar el siguiente upstream.
       MAX_REQUEST_BODY_BYTES: 33554432 # Tamaño máximo permitido del cuerpo de una petición, en bytes.
@@ -138,6 +138,30 @@ upstream mientras su circuito permanece abierto.
 El cuerpo de la petición se mantiene en memoria para poder reenviarlo. El
 límite predeterminado es 32 MiB y se configura con `MAX_REQUEST_BODY_BYTES`.
 Las respuestas se transmiten en streaming sin almacenarlas completas.
+
+El Compose usa **240000 ms**, por encima del deadline absoluto del contenedor
+OAuth (**180000 ms**). El cliente (OpenHands u otro) debe permitir más tiempo,
+por ejemplo **300000 ms**. El valor por defecto del router sin Compose sigue
+siendo 180000 ms: configure los plazos de forma explícita al desplegar.
+Aumentar sólo el timeout del cliente o del router no evita el antiguo corte de
+30 s del proveedor: hay que reconstruir/recrear también `docker_openai-oauth`
+con el helper corregido y `UPSTREAM_TIMEOUT_MS=180000`. Para aplicar el cambio
+de entorno del router, ejecute `docker compose up -d router-openai-oauth` desde
+su directorio; no hace falta reconstruir su imagen.
+
+Para aumentar el tiempo sin editar el YAML, cree o edite `.env` junto a este
+`compose.yaml`. Por ejemplo, para un proveedor OAuth configurado a 600000 ms:
+
+```dotenv
+UPSTREAM_TIMEOUT_MS=660000
+```
+
+Aplique con `docker compose up -d router-openai-oauth`; no requiere reconstruir
+la imagen. También acepta una variable de entorno al ejecutar Compose:
+`UPSTREAM_TIMEOUT_MS=660000 docker compose up -d router-openai-oauth`.
+El rango del router es 1–3600000 ms. Configure el `.env` del proyecto OAuth por
+separado y deje el timeout del cliente por encima del router. Reiniciar sin
+recrear el contenedor no aplica cambios de entorno.
 
 Antes de las cabeceras, `UPSTREAM_TIMEOUT_MS` es un plazo absoluto desde el
 inicio de cada intento; recibir actividad sin cabeceras no reinicia ese plazo.

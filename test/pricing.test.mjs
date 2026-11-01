@@ -1,14 +1,15 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import vm from 'node:vm'
+import http from 'node:http'
 import {readFile} from 'node:fs/promises'
 import {once} from 'node:events'
-import {createPricingReader,normalizeModel,FX_URL} from '../src/pricing-catalog.mjs'
+import {createPricingReader,normalizeModel,CATALOG_URL,FX_URL} from '../src/pricing-catalog.mjs'
 import {createRouterServer} from '../src/server.mjs'
 import {loadConfig} from '../src/config.mjs'
 const epoch=Date.parse('2026-10-08T17:00:00Z')
 const raw=(id='model',extra={})=>({id,provider:'openai',mode:'chat',input_cost_per_token:0.001,output_cost_per_token:0.002,cache_read_input_token_cost:0.0001,...extra})
-const page=(data,has_more=false,p=1,total_count=data.length)=>({data,has_more,page:p,page_size:500,total_count})
+const catalog=(data=[raw()])=>Object.fromEntries(data.map(({id,provider,...m})=>[id,{...m,litellm_provider:provider}]))
 const fx={base:'USD',quote:'EUR',date:'2026-10-08',rate:0.89397}
 test('numeric rates preserve null and zero; allow only token-priced LLMs',()=>{
  for(const v of [null,undefined,'0',-1,Infinity,NaN])assert.equal(normalizeModel(raw('m',{input_cost_per_token:v})).rates.input,null)
@@ -17,31 +18,96 @@ test('numeric rates preserve null and zero; allow only token-priced LLMs',()=>{
  assert.ok(normalizeModel(raw('m',{mode:'completion'})))
  assert.equal(normalizeModel(raw('m',{input_cost_per_token:null,output_cost_per_token:null})),null)
 })
-test('has_more pagination, dedupe, sanitized allowlist, success TTL and single flight',async()=>{
+test('official LiteLLM dictionary loads text/plain over HTTP above the former page size limit',async t=>{
+ const data={sample_spec:{litellm_provider:'example',mode:'chat',input_cost_per_token:0},...catalog([raw('a'),raw('image',{mode:'image_generation'}),raw('other/b',{provider:'other',mode:'completion'})])};
+ data.a.id='FORGED_ID';data.a.provider='FORGED_PROVIDER';
+ const body=JSON.stringify(data)+' '.repeat(2*1024*1024);
+ const requests=[];
+ const server=http.createServer((req,res)=>{
+  assert.equal(req.headers.authorization,undefined);
+  res.setHeader('content-type',req.url==='/fx'?'application/json':'text/plain; charset=utf-8');
+  res.end(req.url==='/fx'?JSON.stringify(fx):body);
+ });
+ server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>{server.closeAllConnections();server.close()});
+ const base=`http://127.0.0.1:${server.address().port}`;
+ const read=createPricingReader({now:()=>epoch,fetchImpl:(url,opts)=>{requests.push(url);return fetch(base+(url===FX_URL?'/fx':'/catalog'),opts)}});
+ const d=await read();assert.ok(d.catalog,'the official JSON catalog must populate the model selector');
+ assert.equal(CATALOG_URL,'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json');
+ assert.deepEqual(requests.sort(),[CATALOG_URL,FX_URL].sort());
+ assert.deepEqual(d.catalog.models,[normalizeModel(raw('a')),normalizeModel(raw('other/b',{provider:'other',mode:'completion'}))]);
+ assert.equal(d.catalog.source,CATALOG_URL);assert.equal(d.catalog.currency,'USD');assert.equal(d.fx.rate,fx.rate);
+});
+test('HTTP MIME allowance is catalog-only; declared and streamed byte limits remain enforced',async t=>{
+ let current;
+ const server=http.createServer((req,res)=>{
+  const isFX=req.url==='/fx',body=JSON.stringify(isFX?fx:catalog());
+  res.setHeader('content-type',isFX?(current.fxType??'application/json'):current.catalogType);
+  if(!current.chunked)res.setHeader('content-length',Buffer.byteLength(body));
+  else res.write(body.slice(0,1));
+  res.end(current.chunked?body.slice(1):body);
+ });
+ server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>{server.closeAllConnections();server.close()});
+ const base=`http://127.0.0.1:${server.address().port}`;
+ for(const scenario of [
+  {catalogType:'text/plain',fxType:'text/plain',catalogOK:true,fxOK:false},
+  {catalogType:'application/json',catalogOK:true,fxOK:true},
+  {catalogType:'text/html',catalogOK:false,fxOK:true},
+  {catalogType:'text/plain',limit:16,catalogOK:false,fxOK:true},
+  {catalogType:'text/plain',limit:16,chunked:true,catalogOK:false,fxOK:true},
+ ]) {
+  current=scenario;
+  const read=createPricingReader({now:()=>epoch,maxCatalogBytes:scenario.limit,fetchImpl:(url,opts)=>fetch(base+(url===FX_URL?'/fx':'/catalog'),opts)});
+  const d=await read();
+  assert.equal(Boolean(d.catalog),scenario.catalogOK,JSON.stringify(scenario));
+  assert.equal(Boolean(d.fx),scenario.fxOK,JSON.stringify(scenario));
+ }
+});
+test('rejected catalog and FX headers cancel unfinished HTTP bodies',async t=>{
+ for(const rejectedPath of ['/catalog','/fx']) for(const reason of ['http','type','size']) await t.test(`${rejectedPath} ${reason}`,async t=>{
+  let closed=false,notifyClose;
+  const closedResponse=new Promise(resolve=>notifyClose=resolve);
+  const server=http.createServer((req,res)=>{
+   if(req.url!==rejectedPath) {res.setHeader('content-type','application/json');res.end(JSON.stringify(req.url==='/fx'?fx:catalog()));return;}
+   res.writeHead(reason==='http'?429:200,{'content-type':reason==='type'?'text/html':'application/json',...(reason==='size'?{'content-length':'8388609'}:{})});
+   res.once('close',()=>{closed=true;notifyClose();});res.flushHeaders();
+  });
+  server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>{server.closeAllConnections();server.close()});
+  const base=`http://127.0.0.1:${server.address().port}`;
+  const read=createPricingReader({now:()=>epoch,timeoutMs:1000,fetchImpl:(url,opts)=>fetch(base+(url===FX_URL?'/fx':'/catalog'),opts)});
+  const d=await read();assert.equal(d[rejectedPath==='/fx'?'fx':'catalog'],null);
+  assert.ok(d[rejectedPath==='/fx'?'catalog':'fx']);
+  let timer;try {await Promise.race([closedResponse,new Promise(resolve=>timer=setTimeout(resolve,250))]);}
+  finally {clearTimeout(timer);}
+  assert.equal(closed,true,'invalid metadata must release its connection before the supplier finishes its body');
+ });
+});
+test('dictionary normalization, sanitized allowlist, success TTL and single flight',async()=>{
  let now=epoch,calls=[]
  const read=createPricingReader({now:()=>now,catalogTTL:100,fxTTL:50,fetchImpl:async(url,opts)=>{
   calls.push(url);assert.deepEqual(opts.headers,{accept:'application/json'});assert.equal(opts.redirect,'error');assert.equal(opts.credentials,'omit')
   if(url===FX_URL)return Response.json(fx)
-  const p=+new URL(url).searchParams.get('page')
-  return Response.json(p===1?page([raw('a',{secret:'PRIVATE'}),raw('image',{mode:'image_generation'})],true,1,4):page([raw('a'),raw('b')],false,2,4))
+  return Response.json(catalog([raw('b',{secret:'PRIVATE'}),raw('image',{mode:'image_generation'}),raw('a')]))
  }})
- const [a,b]=await Promise.all([read(),read()]);assert.deepEqual(a,b);assert.equal(calls.length,3);assert.equal(a.catalog.models.length,2);assert.doesNotMatch(JSON.stringify(a),/PRIVATE|secret/)
- await read();assert.equal(calls.length,3);now+=51;await read();assert.equal(calls.length,4);now+=50;await read();assert.equal(calls.length,7)
+ const [a,b]=await Promise.all([read(),read()]);assert.deepEqual(a,b);assert.equal(calls.length,2);assert.equal(a.catalog.models.length,2);assert.doesNotMatch(JSON.stringify(a),/PRIVATE|secret/)
+ assert.deepEqual(a.catalog.models.map(m=>m.id),['a','b']);
+ await read();assert.equal(calls.length,2);now+=51;await read();assert.equal(calls.length,3);now+=50;await read();assert.equal(calls.length,5)
 })
-test('fail closed incomplete/conflicting/malformed/oversized catalog and cooldown',async()=>{
- for(const bad of [page([],true),page([raw()],true),page([raw()],false,1,99),{data:[raw()]},page([raw(),raw('model',{output_cost_per_token:5})]),'INVALID']) {
+test('fail closed malformed, empty, non-LLM or oversized catalog and cooldown',async()=>{
+ for(const bad of [null,[],{},{data:[raw()]},{a:null},catalog([raw('image',{mode:'image_generation'})]),'INVALID']) {
   let calls=0,now=epoch
-  const read=createPricingReader({now:()=>now,maxPages:1,failureTTL:10,fetchImpl:async url=>{calls++;return url===FX_URL?Response.json(fx):bad==='INVALID'?new Response('{bad',{headers:{'content-type':'application/json'}}):Response.json(bad)}})
+  const read=createPricingReader({now:()=>now,failureTTL:10,fetchImpl:async url=>{calls++;return url===FX_URL?Response.json(fx):bad==='INVALID'?new Response('{bad',{headers:{'content-type':'text/plain'}}):Response.json(bad)}})
   assert.equal((await read()).catalog,null);await read();assert.equal(calls,2);now+=11;await read();assert.equal(calls,3)
  }
- const read=createPricingReader({now:()=>epoch,maxPageBytes:10,fetchImpl:async url=>Response.json(url===FX_URL?fx:page([raw()]))});assert.equal((await read()).catalog,null)
+ const read=createPricingReader({now:()=>epoch,maxCatalogBytes:10,fetchImpl:async url=>Response.json(url===FX_URL?fx:catalog())});assert.equal((await read()).catalog,null)
+ const excessive=createPricingReader({now:()=>epoch,fetchImpl:async url=>Response.json(url===FX_URL?fx:catalog(Array.from({length:15001},(_,i)=>raw(String(i)))))})
+ assert.equal((await excessive()).catalog,null)
 })
 test('FX rejection/expiry falls back to USD, no expired rate; HTTP and timeout failure sanitized',async()=>{
  for(const invalid of [{...fx,rate:0},{...fx,rate:-1},{...fx,rate:'1'},{...fx,base:'EUR'},{...fx,date:'2026-02-30'},{...fx,date:'2026-10-09'},{...fx,date:'2026-09-01'}]) {
-  const read=createPricingReader({now:()=>epoch,fetchImpl:async url=>Response.json(url===FX_URL?invalid:page([raw()]))});const d=await read();assert.equal(d.fx,null);assert.ok(d.catalog)
+  const read=createPricingReader({now:()=>epoch,fetchImpl:async url=>Response.json(url===FX_URL?invalid:catalog())});const d=await read();assert.equal(d.fx,null);assert.ok(d.catalog)
  }
  let now=epoch,fail=false
- const read=createPricingReader({now:()=>now,fxTTL:1,fetchImpl:async url=>url===FX_URL&&fail?new Response('PRIVATE',{status:429}):Response.json(url===FX_URL?fx:page([raw()]))})
+ const read=createPricingReader({now:()=>now,fxTTL:1,fetchImpl:async url=>url===FX_URL&&fail?new Response('PRIVATE',{status:429}):Response.json(url===FX_URL?fx:catalog())})
  assert.ok((await read()).fx);now+=2;fail=true;assert.equal((await read()).fx,null)
  const timed=createPricingReader({timeoutMs:5,fetchImpl:(_,opts)=>new Promise((_,reject)=>opts.signal.addEventListener('abort',()=>reject(Error('PRIVATE'))))});assert.deepEqual([...(Object.values(await timed()).slice(0,2))],[null,null])
 })
@@ -63,7 +129,7 @@ test('exclusive components, no totalTokens flat rate, reasoning output fallback 
 })
 test('read-only endpoint guarded, cached, no quota/inference or query/header leakage',async t=>{
  let calls=0
- const server=createRouterServer(loadConfig({UPSTREAMS:'a=http://127.0.0.1:1',ROUTER_API_KEY:'synthetic'}),{quotaFetchImpl:()=>{throw Error('NO_QUOTA')},pricingFetchImpl:async(url,opts)=>{calls++;assert.equal(opts.headers.authorization,undefined);return Response.json(url===FX_URL?{...fx,date:new Date().toISOString().slice(0,10)}:page([raw()]))}})
+ const server=createRouterServer(loadConfig({UPSTREAMS:'a=http://127.0.0.1:1',ROUTER_API_KEY:'synthetic'}),{quotaFetchImpl:()=>{throw Error('NO_QUOTA')},pricingFetchImpl:async(url,opts)=>{calls++;assert.equal(opts.headers.authorization,undefined);return Response.json(url===FX_URL?{...fx,date:new Date().toISOString().slice(0,10)}:catalog())}})
  server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>{server.closeAllConnections();server.close()});const base=`http://127.0.0.1:${server.address().port}`
  assert.equal(calls,0)
  for(const headers of [{origin:'https://evil.example'},{'sec-fetch-site':'cross-site'}])assert.equal((await fetch(base+'/router/pricing',{headers})).status,403)

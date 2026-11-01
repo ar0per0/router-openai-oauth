@@ -14,6 +14,7 @@ export const parseUsageQuery = params => {
 export const safeUsageRecord = r => {
  const value = { schemaVersion:1 }
  for (const key of ['timestamp','requestId','alias','endpoint','outcome','usageStatus','provenance','modelStatus']) value[key] = r[key]
+ if (typeof value.timestamp !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value.timestamp) || !Number.isFinite(Date.parse(value.timestamp)) || new Date(value.timestamp).toISOString() !== value.timestamp) throw Error('INVALID_RECORD')
  value.modelStatus ??= 'unknown'
  if (!['unknown','completed','failed','incomplete'].includes(value.modelStatus)) throw Error('INVALID_RECORD')
  for (const key of ['attempt','index','status','durationMs',...metrics]) value[key] = r[key] ?? null

@@ -39,6 +39,30 @@ test('SSE Responses CRLF multiline completed, identical repetitions and DONE are
  assert.equal(multi.inputTokens,7)
  for (const type of ['response.failed','response.incomplete']) assert.equal((await observe(`data: ${JSON.stringify({type,response:{usage:u}})}\n\n`,'/v1/responses',{'content-type':'text/event-stream'})).totalTokens,16)
 })
+test('Responses SSE accepts complete terminal JSON and DONE at EOF without a final blank line',async()=>{
+ const event=JSON.stringify({type:'response.completed',response:{status:'completed',usage:u}})
+ for (const eol of ['\n','\r\n','\r']) for (const suffix of ['',eol,eol+eol+'data: [DONE]',eol+eol+'data: [DONE]'+eol]) {
+  const r=await observe('event: response.completed'+eol+'data: '+event+suffix,'/v1/responses',{'content-type':'text/event-stream'})
+  assert.equal(r.totalTokens,16,JSON.stringify({eol,suffix}));assert.equal(r.modelStatus,'completed')
+  assert.equal(r.provenance,'responses_upstream_reported')
+ }
+})
+test('Responses SSE empty data keepalives do not disable usage observation',async()=>{
+ const event='data: '+JSON.stringify({type:'response.completed',response:{usage:u}})+'\n\n'
+ for (const keepalive of ['data:\n\n','data: \n\n','data:   \n\n','data:\ndata:\n\n',': keepalive\n\n']) {
+  const r=await observe(keepalive+event+keepalive,'/v1/responses',{'content-type':'text/event-stream'})
+  assert.equal(r.totalTokens,16,JSON.stringify(keepalive))
+ }
+})
+test('Responses SSE EOF still rejects truncated JSON, incomplete DONE and conflicting usage',async()=>{
+ const event='data: '+JSON.stringify({type:'response.completed',response:{usage:u}})+'\n\n'
+ const conflict='data: '+JSON.stringify({type:'response.completed',response:{usage:{...u,total_tokens:20}}})
+ for (const tail of ['data: {"type":"response.completed","response":{"usage":','data: [DON','data: [DONE]unexpected',conflict]) {
+  const r=await observe(event+tail,'/v1/responses',{'content-type':'text/event-stream'})
+  assert.equal(r.usageStatus,'unknown');assert.equal(r.provenance,'observation_unavailable');assert.equal(r.totalTokens,null)
+ }
+ assert.equal((await observe('data: {"type":"response.output_text.delta","delta":"private"}','/v1/responses',{'content-type':'text/event-stream'})).usageStatus,'unknown')
+})
 test('Chat JSON and final empty choices chunk; adapter provenance, no include_usage request mutation',async()=>{
  const usage={prompt_tokens:0,completion_tokens:2,total_tokens:2,prompt_tokens_details:{cached_tokens:0}}
  assert.equal((await observe(JSON.stringify({choices:[{message:{content:'private'}}],usage}),'/v1/chat/completions')).inputTokens,0)
@@ -161,11 +185,13 @@ test('merged JSON/SSE terminal matches one SQLite row and unchanged summary/pric
  const {parseSummaryQuery,madridDay}=await import('../src/usage-summary.mjs')
  const vm=await import('node:vm')
  const context={Intl};vm.runInNewContext(await readFile(new URL('../src/web/pricing.js',import.meta.url),'utf8'),context)
- for (const endpoint of ['/v1/responses','/v1/chat/completions']) for (const streaming of [false,true]) for (const silent of [false,true]) {
+ for (const endpoint of ['/v1/responses','/v1/chat/completions']) for (const framing of ['json','sse','sse_eof','sse_done_eof','sse_keepalive']) for (const silent of [false,true]) {
+  const streaming=framing!=='json'
   const root=await mkdtemp(join(tmpdir(),'merged-')),store=createUsageStore(join(root,'usage.sqlite')),logs=[],published=[]
   const usage=endpoint.endsWith('responses')?u:{prompt_tokens:12,completion_tokens:4,total_tokens:16,prompt_tokens_details:{cached_tokens:5},completion_tokens_details:{reasoning_tokens:0}}
   const obj=endpoint.endsWith('responses')?{type:'response.completed',response:{usage}}:{choices:[],usage}
-  const payload=streaming?`data: ${JSON.stringify(obj)}\n\ndata: ${JSON.stringify(obj)}\n\ndata: [DONE]\n\n`:JSON.stringify({usage})
+  const event=`data: ${JSON.stringify(obj)}`
+  const payload={json:JSON.stringify({usage}),sse:`${event}\n\n${event}\n\ndata: [DONE]\n\n`,sse_eof:event,sse_done_eof:`${event}\n\ndata: [DONE]`,sse_keepalive:`data:\n\n${event}\n\ndata: \n\n`}[framing]
   const a=http.createServer(async(req,res)=>{for await(const c of req){};res.writeHead(200,{'content-type':streaming?'text/event-stream':'application/json'});res.end(payload)})
   const ua=await listen(a)
   const router=createRouterServer(loadConfig({UPSTREAMS:`account=${ua}`}),{usageStore:store,logger:createLogger({output:silent?()=>{}:l=>logs.push(l),onRecord:(level,event,details)=>published.push({event,...details})}),quotaFetchImpl:async()=>Response.json({rateLimits:null})})

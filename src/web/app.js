@@ -170,8 +170,12 @@
                 if (['outcome','usageStatus','provenance','modelStatus'].includes(key)) {
                  if (typeof v === 'string' && /^[a-z_]{1,80}$/.test(v)) safe[key] = v;
                  continue;
-                }
-                if (key === 'endpoint') { if (['/v1/responses','/v1/chat/completions'].includes(v)) safe[key] = v; continue; }
+                 }
+                 if (key === 'observationError') {
+                  if (['json_depth_limit','selected_value_limit','conflicting_usage','invalid_done_event','invalid_utf8','response_size_limit','invalid_sse_json','invalid_json'].includes(v)) safe[key] = v;
+                  continue;
+                 }
+                 if (key === 'endpoint') { if (['/v1/responses','/v1/chat/completions'].includes(v)) safe[key] = v; continue; }
 
 				if (key === "clientAddress") {
 					const address = clientAddress(v);
